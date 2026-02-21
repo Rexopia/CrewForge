@@ -260,7 +260,7 @@ impl ChatRuntime {
                 .post(
                     agent_id,
                     &format!(
-                        "[dry-run:{}] 我补充一个架构层观点：先固定 Room 协议，再替换接入层实现。",
+                        "[dry-run:{}] I want to add an architectural point: stabilize the Room protocol first, then swap the integration layer.",
                         agent.name
                     ),
                     Some(ack_seq),

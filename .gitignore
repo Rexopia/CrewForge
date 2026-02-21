@@ -1,2 +1,8 @@
 /target
 /.room
+/node_modules
+/npm/crewforge-linux-x64/crewforge
+/npm/crewforge-linux-arm64/crewforge
+/npm/crewforge-darwin-x64/crewforge
+/npm/crewforge-darwin-arm64/crewforge
+/npm/crewforge-win32-x64/crewforge.exe

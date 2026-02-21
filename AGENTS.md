@@ -99,3 +99,21 @@
 - Treat `.room/agents/*/opencode.json` as CrewForge-managed files.
 - Keep profile-name-to-agent-id mapping stable via `normalize_name`.
 - Prefer additive compatibility for persisted files in `.room/sessions` and `.room/agents`.
+
+## Release Process
+
+- Standard release flow is driven by git tag `vX.Y.Z` and GitHub Actions.
+- For each release, update `Cargo.toml` version first, then run the exact command sequence below.
+- Do not manually maintain npm package versions in `package.json`; release workflow syncs versions from the tag.
+
+```bash
+# 1) after updating Cargo.toml version
+cargo test
+git add .
+git commit -m "chore: bump version to X.Y.Z"
+git push origin main
+
+# 2) trigger npm/github release workflow
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
