@@ -27,6 +27,7 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use serde_json::json;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
+use tokio::time::{Duration, sleep};
 use tower::ServiceExt;
 
 use crate::hub::RoomHub;
@@ -284,8 +285,14 @@ impl RoomHubMcpServer {
             let _ = tx.send(());
         }
 
-        if let Some(handle) = self.join_handle.take() {
-            let _ = handle.await;
+        if let Some(mut handle) = self.join_handle.take() {
+            tokio::select! {
+                _ = &mut handle => {}
+                _ = sleep(Duration::from_millis(1000)) => {
+                    handle.abort();
+                    let _ = handle.await;
+                }
+            }
         }
 
         self.bound_addr = None;

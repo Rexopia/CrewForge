@@ -121,6 +121,9 @@ async fn run_process(
     let mut cmd = Command::new(command);
     cmd.args(args)
         .current_dir(cwd)
+        // Ensure child process is terminated when the waiting future/task is dropped
+        // (for example, on Ctrl+D shutdown path with task abort).
+        .kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
