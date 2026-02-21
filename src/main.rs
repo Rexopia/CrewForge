@@ -5,6 +5,8 @@ mod init;
 mod kernel;
 mod managed_opencode;
 mod mcp_server;
+mod profiles;
+mod prompt_theme;
 mod provider;
 mod scheduler;
 mod text;
@@ -20,7 +22,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Initialize .room config and managed agent configs
+    /// Manage global CrewForge profiles (~/.crewforge/profiles.json)
     Init(InitCommandArgs),
 
     /// Start chat runtime (replacement of npm run chat)
@@ -29,21 +31,9 @@ enum Commands {
 
 #[derive(Debug, Args)]
 struct InitCommandArgs {
-    /// Room config file path
-    #[arg(long = "config", default_value = ".room/room.json")]
-    config_path: String,
-
-    /// Room name
-    #[arg(long = "room", default_value = "brainstorm")]
-    room_name: String,
-
-    /// Human display name
-    #[arg(long = "human", default_value = "Rex")]
-    human: String,
-
-    /// Comma-separated agent names
-    #[arg(long = "agents", default_value = "Codex,Kimi,GLM")]
-    agents: String,
+    /// Delete a global profile by name
+    #[arg(long = "delete")]
+    delete: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -68,10 +58,7 @@ async fn main() {
     let result = match cli.command {
         Commands::Init(args) => {
             init::run_init(init::InitArgs {
-                config_path: args.config_path,
-                room_name: args.room_name,
-                human: args.human,
-                agents: args.agents,
+                delete: args.delete,
             })
             .await
         }

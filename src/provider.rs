@@ -108,7 +108,6 @@ impl OpencodeCliProvider {
 
         Ok("(empty reply)".to_string())
     }
-
 }
 
 async fn run_process(

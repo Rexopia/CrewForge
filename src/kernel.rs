@@ -201,7 +201,9 @@ mod tests {
             .await
             .expect("append second");
 
-        let loaded = SessionKernel::load(session_file).await.expect("load kernel");
+        let loaded = SessionKernel::load(session_file)
+            .await
+            .expect("load kernel");
         let snapshot = loaded.transcript_snapshot().await;
         assert_eq!(snapshot.len(), 2);
         assert_eq!(snapshot[0].text, "hello");

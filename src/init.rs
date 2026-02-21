@@ -1,243 +1,345 @@
-use std::collections::HashSet;
-use std::path::Path;
+use std::io::{ErrorKind, IsTerminal, Write};
+use std::process::Stdio;
 
-use anyhow::{Context, Result, bail};
-use serde_json::json;
+use anyhow::{Context, Result, anyhow, bail};
+use cliclack::{confirm, input, intro, log, outro, outro_cancel, select};
+use tokio::process::Command;
 
-use crate::managed_opencode;
+use crate::profiles::{self, GlobalProfile};
+use crate::prompt_theme;
+
+const INIT_CANCELED_MESSAGE: &str = "init canceled by user";
 
 #[derive(Debug, Clone)]
 pub struct InitArgs {
-    pub config_path: String,
-    pub room_name: String,
-    pub human: String,
-    pub agents: String,
+    pub delete: Option<String>,
 }
-
-#[derive(Debug, Clone)]
-struct InitAgent {
-    id: String,
-    name: String,
-    model: String,
-    context_dir: String,
-}
-
-const DEFAULT_RUNTIME_AGENT_NAME: &str = "brainstorm-room";
-const INIT_PLACEHOLDER_MCP_URL: &str = "http://127.0.0.1:0/mcp?token=init";
 
 pub async fn run_init(args: InitArgs) -> Result<()> {
-    let cwd = std::env::current_dir().context("failed to resolve current dir")?;
+    let profiles_path = profiles::global_profiles_path()?;
 
-    let room_name = if args.room_name.trim().is_empty() {
-        "brainstorm".to_string()
-    } else {
-        args.room_name.trim().to_string()
-    };
-    let human = if args.human.trim().is_empty() {
-        "Rex".to_string()
-    } else {
-        args.human.trim().to_string()
-    };
-
-    let agent_names = args
-        .agents
-        .split(',')
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-
-    if agent_names.len() < 2 {
-        bail!("At least 2 agents are required.");
+    if let Some(name) = args.delete {
+        return run_delete_profile(&profiles_path, &name).await;
     }
 
-    let agents = build_agents(&agent_names);
-    let config_path = cwd.join(Path::new(&args.config_path));
+    run_add_profiles(&profiles_path).await
+}
 
-    tokio::fs::create_dir_all(
-        config_path
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("invalid config path"))?,
-    )
-    .await
-    .context("failed creating config directory")?;
-    tokio::fs::create_dir_all(cwd.join(".room/sessions"))
-        .await
-        .context("failed creating .room/sessions")?;
-    tokio::fs::create_dir_all(cwd.join(".room/runtime"))
-        .await
-        .context("failed creating .room/runtime")?;
+async fn run_delete_profile(profiles_path: &std::path::Path, raw_name: &str) -> Result<()> {
+    let target_name = raw_name.trim();
+    if target_name.is_empty() {
+        bail!("--delete requires a non-empty profile name");
+    }
 
-    initialize_managed_agent_configs(&cwd, &agents, &human).await?;
+    let mut profiles = profiles::load_profiles(profiles_path).await?;
+    let before = profiles.len();
+    profiles.retain(|item| item.name != target_name);
+    if profiles.len() == before {
+        bail!("profile not found: {target_name}");
+    }
 
-    let room_config = json!({
-      "roomName": room_name,
-      "human": human,
-      "historyWindow": 18,
-      "runtime": {
-        "schedulerMode": "event_loop",
-        "eventLoop": {
-          "gatherIntervalMs": 5000
-        },
-        "rateLimit": {
-          "windowMs": 60000,
-          "maxPosts": 6
+    profiles::write_profiles(profiles_path, &profiles).await?;
+    println!("Deleted profile: {target_name}");
+    println!("Global profiles: {}", profiles_path.display());
+    Ok(())
+}
+
+async fn run_add_profiles(profiles_path: &std::path::Path) -> Result<()> {
+    let mut profiles = profiles::load_profiles(profiles_path).await?;
+    let models = load_models_from_opencode().await?;
+    let interactive_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+
+    if interactive_tty {
+        prompt_theme::install_prompt_theme();
+        if let Err(error) = intro("CrewForge Init") {
+            return Err(error).context("failed showing init intro");
         }
-      },
-      "opencode": {
-        "command": "opencode",
-        "timeoutMs": 240000,
-        "runtimeAgentName": DEFAULT_RUNTIME_AGENT_NAME
-      },
-      "agents": agents.iter().map(|agent| json!({
-        "id": agent.id,
-        "name": agent.name,
-        "model": agent.model,
-        "contextDir": agent.context_dir,
-        "tools": {
-          "edit": false,
-          "write": false
+        if !profiles.is_empty() {
+            let note_body = existing_profiles_note_body(&profiles);
+            if let Err(error) = cliclack::note("Existing Profiles", note_body) {
+                return Err(error).context("failed showing existing profiles");
+            }
         }
-      })).collect::<Vec<_>>()
-    });
 
-    let config_text = format!("{}\n", serde_json::to_string_pretty(&room_config)?);
-    tokio::fs::write(&config_path, config_text)
-        .await
-        .with_context(|| format!("failed writing room config: {}", config_path.display()))?;
+        let result = run_add_profiles_cliclack(profiles_path, &models, &mut profiles).await;
+        match &result {
+            Ok(()) => {
+                let _ = outro(format!("Done. Total profiles: {}", profiles.len(),));
+            }
+            Err(error) if is_init_canceled(error) => {
+                let _ = outro_cancel("Init canceled.");
+            }
+            Err(_) => {
+                let _ = outro_cancel("Init failed.");
+            }
+        }
+        return result;
+    }
+
+    println!("crewforge init");
+    println!("Global profiles file: {}", path_for_display(profiles_path));
+    if !profiles.is_empty() {
+        println!(
+            "Existing profiles: {}",
+            profiles
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    run_add_profiles_plain(profiles_path, &models, &mut profiles).await?;
 
     println!(
-        "Initialized room config: {}",
-        path_relative_or_absolute(&cwd, &config_path)
+        "Done. Total profiles: {} ({})",
+        profiles.len(),
+        path_for_display(profiles_path)
     );
-    for agent in &agents {
-        println!(
-            "- {} [{}] -> {}/opencode.json",
-            agent.name, agent.model, agent.context_dir
-        );
+    Ok(())
+}
+
+async fn run_add_profiles_plain(
+    profiles_path: &std::path::Path,
+    models: &[String],
+    profiles: &mut Vec<GlobalProfile>,
+) -> Result<()> {
+    let model = prompt_select_model_plain(models)?;
+    let name = prompt_profile_name_plain(profiles)?;
+    let preference = prompt_optional_preference_plain()?;
+
+    profiles.push(GlobalProfile {
+        name: name.clone(),
+        model: model.clone(),
+        preference: preference.clone(),
+    });
+    profiles::write_profiles(profiles_path, profiles).await?;
+
+    println!("Added profile: {name} -> {model}");
+    if let Some(pref) = preference {
+        println!("Preference: {pref}");
+    } else {
+        println!("Preference: (empty)");
+    }
+    Ok(())
+}
+
+async fn run_add_profiles_cliclack(
+    profiles_path: &std::path::Path,
+    models: &[String],
+    profiles: &mut Vec<GlobalProfile>,
+) -> Result<()> {
+    loop {
+        let model = prompt_select_model_cliclack(models)?;
+        let name = prompt_profile_name_cliclack(profiles)?;
+        let preference = prompt_optional_preference_cliclack()?;
+
+        profiles.push(GlobalProfile {
+            name: name.clone(),
+            model: model.clone(),
+            preference: preference.clone(),
+        });
+        profiles::write_profiles(profiles_path, profiles).await?;
+
+        let _ = log::success(format!("Added profile: {name} -> {model}"));
+        if let Some(pref) = &preference {
+            let _ = log::info(format!("Preference: {pref}"));
+        } else {
+            let _ = log::info("Preference: (empty)");
+        }
+
+        let mut another = confirm("Add another profile?").initial_value(true);
+        let should_continue = another.interact().map_err(prompt_error)?;
+        if !should_continue {
+            break;
+        }
     }
 
     Ok(())
 }
 
-fn build_agents(agent_names: &[String]) -> Vec<InitAgent> {
-    let mut used_ids = HashSet::new();
-    agent_names
-        .iter()
-        .map(|name| {
-            let id = ensure_unique_agent_id(name, &mut used_ids);
-            InitAgent {
-                id: id.clone(),
-                name: name.clone(),
-                model: default_model_for_agent(name),
-                context_dir: format!(".room/agents/{id}"),
+fn prompt_select_model_cliclack(models: &[String]) -> Result<String> {
+    let _highlight = prompt_theme::filter_input_highlight_scope();
+    let mut picker = select("Select model").filter_mode().max_rows(10);
+    for model in models {
+        picker = picker.item(model.clone(), model.clone(), "");
+    }
+    picker.interact().map_err(prompt_error)
+}
+
+fn prompt_profile_name_cliclack(existing: &[GlobalProfile]) -> Result<String> {
+    prompt_theme::clear_filter_input_highlight();
+    loop {
+        let mut name_prompt = input("Profile name (unique)").placeholder("Codex");
+        let candidate: String = name_prompt.interact().map_err(prompt_error)?;
+        match profiles::ensure_name_available(existing, &candidate) {
+            Ok(()) => return Ok(candidate.trim().to_string()),
+            Err(error) => {
+                let _ = log::error(format!("Invalid profile name: {error}"));
             }
+        }
+    }
+}
+
+fn prompt_optional_preference_cliclack() -> Result<Option<String>> {
+    prompt_theme::clear_filter_input_highlight();
+    let mut preference_prompt = input("Preference (optional)")
+        .required(false)
+        .placeholder("Press Enter to skip");
+    let text: String = preference_prompt.interact().map_err(prompt_error)?;
+    Ok(profiles::normalize_preference(&text))
+}
+
+async fn load_models_from_opencode() -> Result<Vec<String>> {
+    let command =
+        std::env::var("CREWFORGE_OPENCODE_COMMAND").unwrap_or_else(|_| "opencode".to_string());
+    let output = Command::new(&command)
+        .arg("models")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .with_context(|| format!("failed to run `{command} models`"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        let reason = first_non_empty_line(&stderr)
+            .or_else(|| first_non_empty_line(&stdout))
+            .unwrap_or_else(|| format!("exit {}", output.status.code().unwrap_or(-1)));
+        bail!("`{command} models` failed: {reason}");
+    }
+
+    let models = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if models.is_empty() {
+        bail!("`{command} models` returned no models");
+    }
+    Ok(models)
+}
+
+fn prompt_select_model_plain(models: &[String]) -> Result<String> {
+    let mut filter = String::new();
+
+    loop {
+        let filtered = filtered_models(models, &filter);
+        if filtered.is_empty() {
+            println!("No models matched filter: {filter}");
+        } else {
+            println!();
+            println!("Available models:");
+            for (idx, model) in filtered.iter().enumerate() {
+                println!("  {}. {}", idx + 1, model);
+            }
+        }
+
+        let input = prompt_line_plain(
+            "Select model number, or enter /search <keyword>, /clear to reset filter: ",
+        )?;
+
+        if input == "/clear" {
+            filter.clear();
+            continue;
+        }
+        if let Some(keyword) = input.strip_prefix("/search ") {
+            filter = keyword.trim().to_lowercase();
+            continue;
+        }
+
+        let selected = input.parse::<usize>().ok();
+        let Some(idx) = selected else {
+            println!("Invalid selection, expected a number or /search.");
+            continue;
+        };
+        if idx == 0 || idx > filtered.len() {
+            println!("Selection out of range.");
+            continue;
+        }
+        return Ok(filtered[idx - 1].to_string());
+    }
+}
+
+fn prompt_profile_name_plain(existing: &[GlobalProfile]) -> Result<String> {
+    loop {
+        let candidate = prompt_line_plain("Profile name (unique): ")?;
+        match profiles::ensure_name_available(existing, &candidate) {
+            Ok(()) => return Ok(candidate.trim().to_string()),
+            Err(error) => println!("Invalid profile name: {error}"),
+        }
+    }
+}
+
+fn prompt_optional_preference_plain() -> Result<Option<String>> {
+    let input = prompt_line_plain("Preference (optional, press Enter to skip): ")?;
+    Ok(profiles::normalize_preference(&input))
+}
+
+fn prompt_line_plain(prompt: &str) -> Result<String> {
+    print!("{prompt}");
+    std::io::stdout()
+        .flush()
+        .context("failed to flush stdout")?;
+
+    let mut line = String::new();
+    let read = std::io::stdin()
+        .read_line(&mut line)
+        .context("failed to read stdin")?;
+    if read == 0 {
+        bail!("stdin closed");
+    }
+
+    Ok(line.trim().to_string())
+}
+
+fn filtered_models<'a>(models: &'a [String], filter: &str) -> Vec<&'a str> {
+    let normalized_filter = filter.trim().to_lowercase();
+    models
+        .iter()
+        .filter(|model| {
+            normalized_filter.is_empty() || model.to_lowercase().contains(&normalized_filter)
         })
+        .map(|model| model.as_str())
         .collect()
 }
 
-async fn initialize_managed_agent_configs(cwd: &Path, agents: &[InitAgent], human: &str) -> Result<()> {
-    let members = managed_opencode::build_members(
-        human,
-        agents.iter().map(|agent| agent.name.clone()),
-    );
-
-    for agent in agents {
-        let abs_dir = cwd.join(&agent.context_dir);
-        tokio::fs::create_dir_all(&abs_dir)
-            .await
-            .with_context(|| format!("failed creating agent dir: {}", abs_dir.display()))?;
-
-        let config = managed_opencode::build_managed_opencode_config(
-            DEFAULT_RUNTIME_AGENT_NAME,
-            &agent.name,
-            &members,
-            INIT_PLACEHOLDER_MCP_URL,
-            false,
-        );
-        let text = format!("{}\n", serde_json::to_string_pretty(&config)?);
-        let config_file = abs_dir.join("opencode.json");
-        tokio::fs::write(&config_file, text)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed writing managed opencode config: {}",
-                    config_file.display()
-                )
-            })?;
-    }
-
-    Ok(())
+fn existing_profiles_note_body(profiles: &[GlobalProfile]) -> String {
+    profiles
+        .iter()
+        .map(|profile| format!("{}[{}]", profile.name, profile.model))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
-fn to_agent_id(name: &str) -> String {
-    let mut out = String::new();
-    let mut prev_dash = false;
+fn first_non_empty_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
 
-    for ch in name.trim().chars().flat_map(char::to_lowercase) {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch);
-            prev_dash = false;
-        } else if !prev_dash {
-            out.push('-');
-            prev_dash = true;
+fn prompt_error(error: std::io::Error) -> anyhow::Error {
+    if error.kind() == ErrorKind::Interrupted {
+        anyhow!(INIT_CANCELED_MESSAGE)
+    } else {
+        anyhow!(error).context("interactive prompt failed")
+    }
+}
+
+fn is_init_canceled(error: &anyhow::Error) -> bool {
+    error.to_string().contains(INIT_CANCELED_MESSAGE)
+}
+
+fn path_for_display(path: &std::path::Path) -> String {
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = std::path::PathBuf::from(home);
+        if let Ok(relative) = path.strip_prefix(&home) {
+            return format!("~/{}", relative.display());
         }
     }
-
-    while out.starts_with('-') {
-        out.remove(0);
-    }
-    while out.ends_with('-') {
-        out.pop();
-    }
-
-    if out.is_empty() {
-        "agent".to_string()
-    } else {
-        out
-    }
-}
-
-fn ensure_unique_agent_id(name: &str, used_ids: &mut HashSet<String>) -> String {
-    let base_id = to_agent_id(name);
-    let mut next_id = base_id.clone();
-    let mut suffix = 2_u32;
-
-    while used_ids.contains(&next_id) {
-        next_id = format!("{base_id}-{suffix}");
-        suffix += 1;
-    }
-
-    used_ids.insert(next_id.clone());
-    next_id
-}
-
-fn default_model_for_agent(name: &str) -> String {
-    match name.trim().to_lowercase().as_str() {
-        "codex" => "openai/gpt-5.3-codex".to_string(),
-        "gemini" => "openrouter/google/gemini-3.1-pro-preview".to_string(),
-        "claude" => "openrouter/anthropic/claude-sonnet-4.6".to_string(),
-        "kimi" => "kimi-for-coding/kimi-k2-thinking".to_string(),
-        "glm" => "zhipuai-coding-plan/glm-4.7".to_string(),
-        _ => "openai/gpt-5.3-codex".to_string(),
-    }
-}
-
-fn path_relative_or_absolute(cwd: &Path, abs_path: &Path) -> String {
-    match abs_path.strip_prefix(cwd) {
-        Ok(rel) => rel.display().to_string(),
-        Err(_) => abs_path.display().to_string(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unique_agent_ids_are_generated() {
-        let agents = build_agents(&["Codex".to_string(), "Codex".to_string()]);
-        assert_eq!(agents[0].id, "codex");
-        assert_eq!(agents[1].id, "codex-2");
-    }
+    path.display().to_string()
 }

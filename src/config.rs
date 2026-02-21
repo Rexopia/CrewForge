@@ -48,6 +48,7 @@ pub struct AgentConfig {
     #[allow(dead_code)]
     pub context_dir: String,
     pub tools: AgentTools,
+    pub preference: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -102,6 +103,7 @@ struct RawAgentConfig {
     name: Option<String>,
     model: Option<String>,
     context_dir: Option<String>,
+    preference: Option<String>,
     tools: Option<RawAgentTools>,
 }
 
@@ -148,6 +150,10 @@ pub fn load_room_config(config_path: &Path, workspace_dir: PathBuf) -> Result<Ro
                 edit: tools.edit.unwrap_or(false),
                 write: tools.write.unwrap_or(false),
             },
+            preference: item
+                .preference
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
         });
     }
 

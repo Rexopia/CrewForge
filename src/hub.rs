@@ -305,6 +305,7 @@ mod tests {
                 model: "m1".to_string(),
                 context_dir: ".room/agents/codex".to_string(),
                 tools: AgentTools::default(),
+                preference: None,
             },
             AgentConfig {
                 id: "kimi".to_string(),
@@ -312,6 +313,7 @@ mod tests {
                 model: "m2".to_string(),
                 context_dir: ".room/agents/kimi".to_string(),
                 tools: AgentTools::default(),
+                preference: None,
             },
         ]
     }

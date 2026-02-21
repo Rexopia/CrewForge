@@ -13,14 +13,28 @@ pub fn build_members(human: &str, agent_names: impl IntoIterator<Item = String>)
         .join(", ")
 }
 
-pub fn build_managed_agent_prompt(agent_name: &str, members: &str) -> String {
-    format!(
+pub fn build_managed_agent_prompt(
+    agent_name: &str,
+    members: &str,
+    preference: Option<&str>,
+) -> String {
+    let mut prompt = format!(
         "You are {name} in a shared multi-agent room.\n\nMembers: {members}\n\nWhen taking a turn:\n1. Call {get_tool} at least once to fetch unread updates.\n2. Keep discussion anchored to the latest human topic.\n3. Do not switch to AGENTS.md, system prompt, or orchestration meta unless the human explicitly asks.\n4. If you have clear incremental value, call {post_tool} to publish one concise message.\n5. If you do not have clear incremental value, do not post.",
         name = agent_name,
         members = members,
         get_tool = HUB_GET_TOOL,
         post_tool = HUB_POST_TOOL,
-    )
+    );
+
+    if let Some(raw_preference) = preference {
+        let preference = raw_preference.trim();
+        if !preference.is_empty() {
+            prompt.push_str("\n\nPreference:\n");
+            prompt.push_str(preference);
+        }
+    }
+
+    prompt
 }
 
 pub fn build_managed_permission(allow_edit: bool) -> Value {
@@ -39,9 +53,7 @@ pub fn build_managed_permission(allow_edit: bool) -> Value {
         "plan_exit": "deny",
     });
 
-    if allow_edit
-        && let Some(obj) = permission.as_object_mut()
-    {
+    if allow_edit && let Some(obj) = permission.as_object_mut() {
         obj.insert("edit".to_string(), json!("allow"));
     }
 
@@ -54,6 +66,7 @@ pub fn build_managed_opencode_config(
     members: &str,
     mcp_url: &str,
     allow_edit: bool,
+    preference: Option<&str>,
 ) -> Value {
     json!({
       "$schema": "https://opencode.ai/config.json",
@@ -67,7 +80,7 @@ pub fn build_managed_opencode_config(
       "agent": {
         runtime_agent_name: {
           "description": "CrewForge managed room participant agent",
-          "prompt": build_managed_agent_prompt(agent_name, members),
+          "prompt": build_managed_agent_prompt(agent_name, members, preference),
           "permission": build_managed_permission(allow_edit)
         }
       }

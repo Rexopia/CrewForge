@@ -1,25 +1,29 @@
-use std::collections::HashMap;
-use std::io::{IsTerminal, Write};
+use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
+use cliclack::{input, intro, log, multiselect, outro, outro_cancel, select};
 use rand::Rng;
 use rustyline_async::{Readline, ReadlineEvent, SharedWriter};
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant, sleep};
 use uuid::Uuid;
 
-use crate::config::{AgentTools, RoomConfig, load_room_config};
+use crate::config::{AgentConfig, AgentTools, RoomConfig, load_room_config};
 use crate::hub::{RateLimitUsage, RoomHub};
 use crate::kernel::{MessageRole, SessionKernel};
 use crate::managed_opencode::{self, HUB_ACK_TOOL, HUB_GET_TOOL, HUB_POST_TOOL};
 use crate::mcp_server::RoomHubMcpServer;
+use crate::profiles::{self, GlobalProfile};
+use crate::prompt_theme;
 use crate::provider::{OpencodeCliProvider, OpencodeProviderConfig};
 use crate::scheduler::{WakeDecision, WorkerState, decide_wake, on_wake_finished};
 use crate::text::{format_time, to_single_line_error};
@@ -28,6 +32,9 @@ const COLOR_RESET: &str = "\x1b[0m";
 const COLOR_DIM: &str = "\x1b[2m";
 const COLOR_HUMAN: &str = "\x1b[36m";
 const AGENT_COLORS: [&str; 5] = ["\x1b[32m", "\x1b[33m", "\x1b[35m", "\x1b[34m", "\x1b[31m"];
+const INIT_PLACEHOLDER_MCP_URL: &str = "http://127.0.0.1:0/mcp?token=init";
+const MIN_ENABLED_AGENTS: usize = 2;
+const CHAT_SETUP_CANCELED_MESSAGE: &str = "chat setup canceled by user";
 
 #[derive(Debug, Clone)]
 pub struct ChatArgs {
@@ -44,6 +51,55 @@ struct RuntimeAgent {
     runtime_dir: PathBuf,
     hub_token: String,
     tools: AgentTools,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionMeta {
+    human: String,
+    enabled_names: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RoomConfigTemplate {
+    room_name: String,
+    scheduler_mode: String,
+    gather_interval_ms: u64,
+    rate_window_ms: u64,
+    rate_max_posts: usize,
+    opencode_command: String,
+    opencode_timeout_ms: u64,
+    runtime_agent_name: String,
+}
+
+impl Default for RoomConfigTemplate {
+    fn default() -> Self {
+        Self {
+            room_name: "brainstorm".to_string(),
+            scheduler_mode: "event_loop".to_string(),
+            gather_interval_ms: 5000,
+            rate_window_ms: 60_000,
+            rate_max_posts: 6,
+            opencode_command: "opencode".to_string(),
+            opencode_timeout_ms: 240_000,
+            runtime_agent_name: "brainstorm-room".to_string(),
+        }
+    }
+}
+
+impl From<&RoomConfig> for RoomConfigTemplate {
+    fn from(value: &RoomConfig) -> Self {
+        Self {
+            room_name: value.room_name.clone(),
+            scheduler_mode: value.runtime.scheduler_mode.clone(),
+            gather_interval_ms: value.runtime.event_loop.gather_interval_ms,
+            rate_window_ms: value.runtime.rate_limit.window_ms,
+            rate_max_posts: value.runtime.rate_limit.max_posts,
+            opencode_command: value.opencode.command.clone(),
+            opencode_timeout_ms: value.opencode.timeout_ms,
+            runtime_agent_name: value.opencode.runtime_agent_name.clone(),
+        }
+    }
 }
 
 struct ChatRuntime {
@@ -372,12 +428,32 @@ impl ChatRuntime {
 pub async fn run_chat(args: ChatArgs) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to resolve current dir")?;
     let config_path = cwd.join(Path::new(&args.config_path));
-    let mut room = load_room_config(&config_path, cwd.clone())?;
     let is_tty = std::io::stdin().is_terminal();
-
     let sessions_dir = cwd.join(".room/sessions");
+
+    if args.resume.is_none() {
+        prepare_room_config_for_chat(&cwd, &config_path, is_tty).await?;
+    }
+
+    let mut room = load_room_config(&config_path, cwd.clone())?;
+
     let (kernel, resumed_from) =
         open_session_kernel(&cwd, &sessions_dir, args.resume.as_deref()).await?;
+    let resume_warnings = if let Some(session_file) = resumed_from.as_ref() {
+        let meta = read_session_meta(session_file).await?;
+        apply_resume_meta(&mut room, &meta).await?
+    } else {
+        let enabled_names = room
+            .agents
+            .iter()
+            .map(|agent| agent.name.clone())
+            .collect::<Vec<_>>();
+        write_session_meta(&kernel.session_file, &room.human, &enabled_names).await?;
+        Vec::new()
+    };
+
+    ensure_room_agent_configs(&cwd, &room).await?;
+
     let initial_snapshot = kernel.transcript_snapshot().await;
     let initial_observed_event_seq = initial_snapshot
         .iter()
@@ -410,15 +486,20 @@ pub async fn run_chat(args: ChatArgs) -> Result<()> {
             .await;
     }
 
-    let mut mcp_server = RoomHubMcpServer::new(
-        "127.0.0.1",
-        runtime_agents
-            .iter()
-            .map(|agent| (agent.id.clone(), agent.hub_token.clone()))
-            .collect(),
-    );
-    mcp_server.start(room_hub.clone()).await?;
-    write_runtime_opencode_configs(&room, &runtime_agents, &mcp_server).await?;
+    let mut mcp_server = if args.dry_run {
+        None
+    } else {
+        let mut server = RoomHubMcpServer::new(
+            "127.0.0.1",
+            runtime_agents
+                .iter()
+                .map(|agent| (agent.id.clone(), agent.hub_token.clone()))
+                .collect(),
+        );
+        server.start(room_hub.clone()).await?;
+        write_runtime_opencode_configs(&room, &runtime_agents, &server).await?;
+        Some(server)
+    };
 
     let mut providers_by_agent_id = HashMap::new();
     for agent in &runtime_agents {
@@ -478,7 +559,11 @@ pub async fn run_chat(args: ChatArgs) -> Result<()> {
         "Runtime agent context: {}",
         runtime_root.display()
     ));
-    runtime.print_system_line(&format!("Hub MCP: {}/mcp", mcp_server.base_url()?));
+    if let Some(server) = mcp_server.as_ref() {
+        runtime.print_system_line(&format!("Hub MCP: {}/mcp", server.base_url()?));
+    } else {
+        runtime.print_system_line("Hub MCP: disabled in dry-run mode");
+    }
     runtime.print_system_line(&format!("Human: {}", runtime.room.human));
     runtime.print_system_line(&format!(
         "Agents: {}",
@@ -497,6 +582,9 @@ pub async fn run_chat(args: ChatArgs) -> Result<()> {
         "Rate limit: {} posts / {}ms per agent",
         runtime.room.runtime.rate_limit.max_posts, runtime.room.runtime.rate_limit.window_ms
     ));
+    for warning in &resume_warnings {
+        runtime.print_system_line(&format!("[warning] {warning}"));
+    }
     if args.dry_run {
         runtime.print_system_line("Running in dry-run mode (no provider calls).");
     }
@@ -588,7 +676,9 @@ pub async fn run_chat(args: ChatArgs) -> Result<()> {
         let _ = handle.await;
     }
     runtime.wait_active_tasks(1_000).await;
-    mcp_server.stop().await?;
+    if let Some(server) = mcp_server.as_mut() {
+        server.stop().await?;
+    }
 
     runtime.print_plain_line("");
     runtime.print_plain_line("Resume this session with:");
@@ -597,6 +687,401 @@ pub async fn run_chat(args: ChatArgs) -> Result<()> {
         build_resume_hint_command(&args, &app_session_id)
     ));
     runtime.print_system_line("Chat ended.");
+    Ok(())
+}
+
+async fn prepare_room_config_for_chat(cwd: &Path, config_path: &Path, is_tty: bool) -> Result<()> {
+    let has_room_config = tokio::fs::try_exists(config_path).await.with_context(|| {
+        format!(
+            "failed checking room config existence: {}",
+            config_path.display()
+        )
+    })?;
+
+    if !has_room_config {
+        if !is_tty {
+            bail!(
+                "room config not found: {}. Run `crewforge chat` in an interactive terminal to configure this directory.",
+                config_path.display()
+            );
+        }
+    } else if !is_tty {
+        return Ok(());
+    }
+
+    prompt_theme::install_prompt_theme();
+
+    if let Err(error) = intro("CrewForge Chat Setup") {
+        return Err(error).context("failed showing chat setup intro");
+    }
+    let _ = cliclack::note("Workspace", cwd.display().to_string());
+
+    let result = if !has_room_config {
+        let profiles = load_required_global_profiles().await?;
+        let template = RoomConfigTemplate::default();
+        let human = prompt_human_name("Rex")?;
+        let selected_profiles = prompt_enabled_profiles(&profiles, &[])?;
+        write_room_config_from_profiles(cwd, config_path, &template, &human, &selected_profiles)
+            .await
+    } else {
+        let existing_room = load_room_config(config_path, cwd.to_path_buf())?;
+        if prompt_continue_current_config()? {
+            Ok(())
+        } else {
+            let profiles = load_required_global_profiles().await?;
+            let template = RoomConfigTemplate::from(&existing_room);
+            let existing_names = existing_room
+                .agents
+                .iter()
+                .map(|item| item.name.clone())
+                .collect::<Vec<_>>();
+            let human = prompt_human_name(&existing_room.human)?;
+            let selected_profiles = prompt_enabled_profiles(&profiles, &existing_names)?;
+            write_room_config_from_profiles(cwd, config_path, &template, &human, &selected_profiles)
+                .await
+        }
+    };
+
+    match &result {
+        Ok(()) => {
+            let _ = outro("Chat configuration ready.");
+        }
+        Err(error) if is_chat_setup_canceled(error) => {
+            let _ = outro_cancel("Chat setup canceled.");
+        }
+        Err(_) => {
+            let _ = outro_cancel("Chat setup failed.");
+        }
+    }
+    result
+}
+
+async fn load_required_global_profiles() -> Result<Vec<GlobalProfile>> {
+    let profiles_path = profiles::global_profiles_path()?;
+    let profiles = profiles::load_profiles(&profiles_path).await?;
+    if profiles.is_empty() {
+        bail!(
+            "no global profiles found in {}. Run `crewforge init` first.",
+            profiles_path.display()
+        );
+    }
+    Ok(profiles)
+}
+
+fn prompt_continue_current_config() -> Result<bool> {
+    let mut picker = select("Room config already exists. Choose action.")
+        .item("continue".to_string(), "Continue current configuration", "")
+        .item(
+            "reconfigure".to_string(),
+            "Reconfigure enabled profiles",
+            "Rewrite .room/room.json with selected profile names",
+        );
+    let choice = picker.interact().map_err(chat_setup_prompt_error)?;
+    Ok(choice == "continue")
+}
+
+fn prompt_human_name(default_value: &str) -> Result<String> {
+    prompt_theme::clear_filter_input_highlight();
+    let mut prompt = input("Human display name")
+        .default_input(default_value)
+        .validate(|value: &String| {
+            if value.trim().is_empty() {
+                Err("human name cannot be empty")
+            } else {
+                Ok(())
+            }
+        });
+    let human: String = prompt.interact().map_err(chat_setup_prompt_error)?;
+    Ok(human.trim().to_string())
+}
+
+fn prompt_enabled_profiles(
+    profiles: &[GlobalProfile],
+    initial_selected_names: &[String],
+) -> Result<Vec<GlobalProfile>> {
+    loop {
+        let _highlight = prompt_theme::filter_input_highlight_scope();
+        let mut picker =
+            multiselect("Select enabled profiles for this chat\n(Press Space to select/deselect)")
+                .filter_mode()
+                .max_rows(10)
+                .required(false);
+
+        if !initial_selected_names.is_empty() {
+            picker = picker.initial_values(initial_selected_names.to_vec());
+        }
+
+        for profile in profiles {
+            let hint = profile
+                .preference
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("");
+            let label = format!("{} [{}]", profile.name, profile.model);
+            picker = picker.item(profile.name.clone(), label, hint);
+        }
+
+        let selected_names = picker.interact().map_err(chat_setup_prompt_error)?;
+        if selected_names.len() < MIN_ENABLED_AGENTS {
+            let _ = log::warning(format!(
+                "Select at least {MIN_ENABLED_AGENTS} profiles for room chat."
+            ));
+            continue;
+        }
+
+        let mut profile_by_name = HashMap::new();
+        for profile in profiles {
+            profile_by_name.insert(profile.name.as_str(), profile);
+        }
+
+        let mut seen = HashSet::new();
+        let mut selected_profiles = Vec::new();
+        for name in selected_names {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            if let Some(profile) = profile_by_name.get(name.as_str()) {
+                selected_profiles.push((*profile).clone());
+            }
+        }
+        return Ok(selected_profiles);
+    }
+}
+
+async fn write_room_config_from_profiles(
+    cwd: &Path,
+    config_path: &Path,
+    template: &RoomConfigTemplate,
+    human: &str,
+    profiles: &[GlobalProfile],
+) -> Result<()> {
+    let config_parent = config_path
+        .parent()
+        .ok_or_else(|| anyhow!("invalid config path: {}", config_path.display()))?;
+    tokio::fs::create_dir_all(config_parent)
+        .await
+        .with_context(|| {
+            format!(
+                "failed creating config directory: {}",
+                config_parent.display()
+            )
+        })?;
+    tokio::fs::create_dir_all(cwd.join(".room/sessions"))
+        .await
+        .context("failed creating .room/sessions")?;
+    tokio::fs::create_dir_all(cwd.join(".room/runtime"))
+        .await
+        .context("failed creating .room/runtime")?;
+
+    let agents = profiles
+        .iter()
+        .map(profile_to_room_agent_json)
+        .collect::<Vec<_>>();
+    let room_config = json!({
+        "roomName": template.room_name,
+        "human": human,
+        "historyWindow": 18,
+        "runtime": {
+            "schedulerMode": template.scheduler_mode,
+            "eventLoop": {
+                "gatherIntervalMs": template.gather_interval_ms
+            },
+            "rateLimit": {
+                "windowMs": template.rate_window_ms,
+                "maxPosts": template.rate_max_posts
+            }
+        },
+        "opencode": {
+            "command": template.opencode_command,
+            "timeoutMs": template.opencode_timeout_ms,
+            "runtimeAgentName": template.runtime_agent_name
+        },
+        "agents": agents
+    });
+
+    let text = format!("{}\n", serde_json::to_string_pretty(&room_config)?);
+    tokio::fs::write(config_path, text)
+        .await
+        .with_context(|| format!("failed writing room config: {}", config_path.display()))?;
+    Ok(())
+}
+
+fn profile_to_room_agent_json(profile: &GlobalProfile) -> Value {
+    let id = profiles::normalize_name(&profile.name);
+    let mut value = json!({
+        "id": id,
+        "name": profile.name,
+        "model": profile.model,
+        "contextDir": format!(".room/agents/{id}"),
+        "tools": {
+            "edit": false,
+            "write": false
+        }
+    });
+
+    if let Some(preference) = &profile.preference
+        && !preference.trim().is_empty()
+    {
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("preference".to_string(), json!(preference.trim()));
+        }
+    }
+
+    value
+}
+
+fn chat_setup_prompt_error(error: std::io::Error) -> anyhow::Error {
+    if error.kind() == ErrorKind::Interrupted {
+        anyhow!(CHAT_SETUP_CANCELED_MESSAGE)
+    } else {
+        anyhow!("chat setup prompt failed: {error}")
+    }
+}
+
+fn is_chat_setup_canceled(error: &anyhow::Error) -> bool {
+    error.to_string().contains(CHAT_SETUP_CANCELED_MESSAGE)
+}
+
+async fn apply_resume_meta(room: &mut RoomConfig, meta: &SessionMeta) -> Result<Vec<String>> {
+    let profiles_path = profiles::global_profiles_path()?;
+    let global_profiles = profiles::load_profiles(&profiles_path).await?;
+    let profile_by_name = global_profiles
+        .iter()
+        .map(|item| (item.name.clone(), item.clone()))
+        .collect::<HashMap<_, _>>();
+
+    let mut warnings = Vec::new();
+    let mut selected_agents = Vec::new();
+    let mut seen_ids = HashSet::new();
+
+    for raw_name in &meta.enabled_names {
+        let name = raw_name.trim();
+        if name.is_empty() {
+            continue;
+        }
+
+        let Some(profile) = profile_by_name.get(name) else {
+            warnings.push(format!(
+                "profile \"{name}\" was deleted from {} and has been disabled",
+                profiles_path.display()
+            ));
+            continue;
+        };
+
+        let agent = profile_to_agent_config(profile);
+        if !seen_ids.insert(agent.id.clone()) {
+            warnings.push(format!(
+                "profile \"{name}\" conflicts after normalization and has been skipped"
+            ));
+            continue;
+        }
+        selected_agents.push(agent);
+    }
+
+    if selected_agents.is_empty() {
+        bail!("resume failed: no enabled profiles available");
+    }
+
+    let human = meta.human.trim();
+    if !human.is_empty() {
+        room.human = human.to_string();
+    }
+    room.agents = selected_agents;
+    Ok(warnings)
+}
+
+fn profile_to_agent_config(profile: &GlobalProfile) -> AgentConfig {
+    let id = profiles::normalize_name(&profile.name);
+    AgentConfig {
+        id: id.clone(),
+        name: profile.name.clone(),
+        model: profile.model.clone(),
+        context_dir: format!(".room/agents/{id}"),
+        tools: AgentTools::default(),
+        preference: profile.preference.clone(),
+    }
+}
+
+async fn ensure_room_agent_configs(cwd: &Path, room: &RoomConfig) -> Result<()> {
+    let members = managed_opencode::build_members(
+        &room.human,
+        room.agents.iter().map(|item| item.name.clone()),
+    );
+
+    for agent in &room.agents {
+        let runtime_dir = cwd.join(Path::new(&agent.context_dir));
+        tokio::fs::create_dir_all(&runtime_dir)
+            .await
+            .with_context(|| format!("failed creating runtime dir: {}", runtime_dir.display()))?;
+
+        let config_path = runtime_dir.join("opencode.json");
+        if tokio::fs::try_exists(&config_path).await.unwrap_or(false) {
+            continue;
+        }
+
+        let config = managed_opencode::build_managed_opencode_config(
+            &room.opencode.runtime_agent_name,
+            &agent.name,
+            &members,
+            INIT_PLACEHOLDER_MCP_URL,
+            false,
+            agent.preference.as_deref(),
+        );
+        let text = format!("{}\n", serde_json::to_string_pretty(&config)?);
+        tokio::fs::write(&config_path, text)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed writing managed opencode config: {}",
+                    config_path.display()
+                )
+            })?;
+    }
+
+    Ok(())
+}
+
+fn session_meta_path(session_file: &Path) -> Result<PathBuf> {
+    let session_id = session_file
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| anyhow!("invalid session file: {}", session_file.display()))?;
+    let parent = session_file
+        .parent()
+        .ok_or_else(|| anyhow!("invalid session parent: {}", session_file.display()))?;
+    Ok(parent.join(format!("{session_id}.meta.json")))
+}
+
+async fn read_session_meta(session_file: &Path) -> Result<SessionMeta> {
+    let meta_path = session_meta_path(session_file)?;
+    let raw = tokio::fs::read_to_string(&meta_path)
+        .await
+        .with_context(|| format!("failed reading session metadata: {}", meta_path.display()))?;
+    let meta: SessionMeta = serde_json::from_str(&raw)
+        .with_context(|| format!("invalid session metadata JSON: {}", meta_path.display()))?;
+    Ok(meta)
+}
+
+async fn write_session_meta(
+    session_file: &Path,
+    human: &str,
+    enabled_names: &[String],
+) -> Result<()> {
+    let meta_path = session_meta_path(session_file)?;
+    let meta = SessionMeta {
+        human: human.trim().to_string(),
+        enabled_names: enabled_names
+            .iter()
+            .map(|name| name.trim())
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect(),
+    };
+    let text = format!("{}\n", serde_json::to_string_pretty(&meta)?);
+    tokio::fs::write(&meta_path, text)
+        .await
+        .with_context(|| format!("failed writing session metadata: {}", meta_path.display()))?;
     Ok(())
 }
 
@@ -721,6 +1206,19 @@ async fn open_session_kernel(
             return Err(anyhow!("--resume value cannot be empty"));
         }
         let session_file = resolve_resume_session_file(cwd, sessions_dir, resume).await;
+        let meta_file = session_meta_path(&session_file)?;
+        let meta_exists = tokio::fs::try_exists(&meta_file).await.with_context(|| {
+            format!(
+                "failed checking resume metadata file existence: {}",
+                meta_file.display()
+            )
+        })?;
+        if !meta_exists {
+            bail!(
+                "resume failed: metadata file not found: {}",
+                meta_file.display()
+            );
+        }
         let kernel = SessionKernel::load(session_file.clone()).await?;
         return Ok((Arc::new(kernel), Some(session_file)));
     }
@@ -751,7 +1249,9 @@ async fn resolve_resume_session_file(cwd: &Path, sessions_dir: &Path, resume: &s
     }
 }
 
-async fn initialize_runtime_agent_contexts(room: &RoomConfig) -> Result<(Vec<RuntimeAgent>, PathBuf)> {
+async fn initialize_runtime_agent_contexts(
+    room: &RoomConfig,
+) -> Result<(Vec<RuntimeAgent>, PathBuf)> {
     let runtime_root = room.workspace_dir.join(".room").join("agents");
     tokio::fs::create_dir_all(&runtime_root)
         .await
@@ -782,8 +1282,10 @@ async fn write_runtime_opencode_configs(
     runtime_agents: &[RuntimeAgent],
     mcp_server: &RoomHubMcpServer,
 ) -> Result<()> {
-    let members =
-        managed_opencode::build_members(&room.human, room.agents.iter().map(|item| item.name.clone()));
+    let members = managed_opencode::build_members(
+        &room.human,
+        room.agents.iter().map(|item| item.name.clone()),
+    );
 
     for agent in runtime_agents {
         let mcp_url = mcp_server.get_mcp_url_for_agent(&agent.id)?;
@@ -798,9 +1300,14 @@ async fn write_runtime_opencode_configs(
         if !updated {
             let config = build_runtime_opencode_config_fallback(room, agent, &members, &mcp_url);
             let text = format!("{}\n", serde_json::to_string_pretty(&config)?);
-            tokio::fs::write(&config_path, text).await.with_context(|| {
-                format!("failed writing runtime opencode.json: {}", config_path.display())
-            })?;
+            tokio::fs::write(&config_path, text)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed writing runtime opencode.json: {}",
+                        config_path.display()
+                    )
+                })?;
         }
     }
     Ok(())
@@ -816,7 +1323,10 @@ async fn update_runtime_opencode_mcp_url(
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
         Err(error) => {
             return Err(error).with_context(|| {
-                format!("failed reading runtime opencode.json: {}", config_path.display())
+                format!(
+                    "failed reading runtime opencode.json: {}",
+                    config_path.display()
+                )
             });
         }
     };
@@ -835,9 +1345,12 @@ async fn update_runtime_opencode_mcp_url(
     }
 
     let text = format!("{}\n", serde_json::to_string_pretty(&config)?);
-    tokio::fs::write(config_path, text)
-        .await
-        .with_context(|| format!("failed writing runtime opencode.json: {}", config_path.display()))?;
+    tokio::fs::write(config_path, text).await.with_context(|| {
+        format!(
+            "failed writing runtime opencode.json: {}",
+            config_path.display()
+        )
+    })?;
 
     Ok(true)
 }
@@ -876,12 +1389,19 @@ fn build_runtime_opencode_config_fallback(
         &agent.name
     };
 
+    let preference = room
+        .agents
+        .iter()
+        .find(|item| item.id == agent.id)
+        .and_then(|item| item.preference.as_deref());
+
     managed_opencode::build_managed_opencode_config(
         &room.opencode.runtime_agent_name,
         agent_name,
         members,
         mcp_url,
         agent.tools.edit || agent.tools.write,
+        preference,
     )
 }
 
@@ -923,6 +1443,7 @@ mod tests {
                 model: "m".to_string(),
                 context_dir: ".room/agents/codex".to_string(),
                 tools: AgentTools::default(),
+                preference: None,
             }],
             workspace_dir: PathBuf::new(),
         };
@@ -936,13 +1457,7 @@ mod tests {
             tools: AgentTools::default(),
         };
 
-        let prompt = build_event_turn_prompt(
-            &room,
-            &agent,
-            &RateLimitUsage {
-                remaining: 6,
-            },
-        );
+        let prompt = build_event_turn_prompt(&room, &agent, &RateLimitUsage { remaining: 6 });
 
         assert!(prompt.contains(HUB_GET_TOOL));
     }
@@ -959,10 +1474,7 @@ mod tests {
         let sessions = cwd.join(".room/sessions");
         let resolved =
             resolve_resume_session_file(&cwd, &sessions, "session-2026-02-21T12-34").await;
-        assert_eq!(
-            resolved,
-            sessions.join("session-2026-02-21T12-34.jsonl")
-        );
+        assert_eq!(resolved, sessions.join("session-2026-02-21T12-34.jsonl"));
     }
 
     #[tokio::test]
@@ -973,12 +1485,7 @@ mod tests {
         std::fs::create_dir_all(&sessions).expect("create sessions dir");
         let relative = ".room/sessions/session-2026-02-21T12-34-56-789Z.jsonl";
         std::fs::write(cwd.join(relative), "").expect("write session file");
-        let resolved = resolve_resume_session_file(
-            &cwd,
-            &sessions,
-            relative,
-        )
-        .await;
+        let resolved = resolve_resume_session_file(&cwd, &sessions, relative).await;
         assert_eq!(
             resolved,
             cwd.join(".room/sessions/session-2026-02-21T12-34-56-789Z.jsonl")
@@ -1010,5 +1517,4 @@ mod tests {
             "crewforge chat --config custom/room.json --resume session-2026-02-21T13-53-50-911Z"
         );
     }
-
 }
