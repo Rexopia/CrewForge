@@ -10,6 +10,7 @@ mod prompt_theme;
 mod provider;
 mod scheduler;
 mod text;
+mod tui;
 
 use clap::{Args, Parser, Subcommand};
 

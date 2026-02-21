@@ -1,14 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
 
 use anyhow::{Context, Result, anyhow, bail};
 use cliclack::{input, intro, log, multiselect, outro, outro_cancel, select};
 use rand::Rng;
-use rustyline_async::{Readline, ReadlineEvent, SharedWriter};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -27,11 +26,8 @@ use crate::prompt_theme;
 use crate::provider::{OpencodeCliProvider, OpencodeProviderConfig};
 use crate::scheduler::{WakeDecision, WorkerState, decide_wake, on_wake_finished};
 use crate::text::{format_time, to_single_line_error};
+use crate::tui::DisplayLine;
 
-const COLOR_RESET: &str = "\x1b[0m";
-const COLOR_DIM: &str = "\x1b[2m";
-const COLOR_HUMAN: &str = "\x1b[36m";
-const AGENT_COLORS: [&str; 5] = ["\x1b[32m", "\x1b[33m", "\x1b[35m", "\x1b[34m", "\x1b[31m"];
 const INIT_PLACEHOLDER_MCP_URL: &str = "http://127.0.0.1:0/mcp?token=init";
 const MIN_ENABLED_AGENTS: usize = 2;
 const CHAT_SETUP_CANCELED_MESSAGE: &str = "chat setup canceled by user";
@@ -102,7 +98,7 @@ impl From<&RoomConfig> for RoomConfigTemplate {
     }
 }
 
-struct ChatRuntime {
+pub(crate) struct ChatRuntime {
     room: Arc<RoomConfig>,
     runtime_agents: Arc<Vec<RuntimeAgent>>,
     kernel: Arc<SessionKernel>,
@@ -112,41 +108,26 @@ struct ChatRuntime {
     active_wake_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
     observed_event_seq: Arc<Mutex<u64>>,
     dry_run: bool,
-    agent_color_by_id: HashMap<String, &'static str>,
-    tty_writer: Arc<StdMutex<Option<SharedWriter>>>,
+    agent_index_by_id: HashMap<String, usize>,
+    msg_tx: tokio::sync::mpsc::UnboundedSender<DisplayLine>,
 }
 
 impl ChatRuntime {
+    pub(crate) fn human_name(&self) -> &str {
+        &self.room.human
+    }
+
     fn print_system_line(&self, text: &str) {
-        self.render_room_line(&format!("{COLOR_DIM}{text}{COLOR_RESET}"));
+        self.send_display_line(DisplayLine::System(text.to_string()));
     }
 
     fn print_plain_line(&self, text: &str) {
-        self.render_room_line(text);
+        self.send_display_line(DisplayLine::System(text.to_string()));
     }
 
-    fn render_room_line(&self, line: &str) {
-        if let Ok(mut writer_opt) = self.tty_writer.lock() {
-            if let Some(writer) = writer_opt.as_mut() {
-                let written_ok = writeln!(writer, "{line}").is_ok() && writer.flush().is_ok();
-                if written_ok {
-                    return;
-                }
-            }
-            *writer_opt = None;
-        }
-        println!("{line}");
-    }
-
-    fn attach_tty_writer(&self, writer: SharedWriter) {
-        if let Ok(mut guard) = self.tty_writer.lock() {
-            *guard = Some(writer);
-        }
-    }
-
-    fn detach_tty_writer(&self) {
-        if let Ok(mut guard) = self.tty_writer.lock() {
-            *guard = None;
+    fn send_display_line(&self, line: DisplayLine) {
+        if self.msg_tx.send(line.clone()).is_err() {
+            println!("{}", line.as_plain_text());
         }
     }
 
@@ -160,17 +141,21 @@ impl ChatRuntime {
     ) {
         let ts = format_time(ts);
         let line = match role {
-            MessageRole::Human => {
-                format!("{COLOR_HUMAN}[{ts}] {speaker}{COLOR_RESET}: {text}")
-            }
-            MessageRole::Agent => {
-                let color = agent_id
-                    .and_then(|id| self.agent_color_by_id.get(id).copied())
-                    .unwrap_or("");
-                format!("{color}[{ts}] {speaker}{COLOR_RESET}: {text}")
-            }
+            MessageRole::Human => DisplayLine::Human {
+                ts,
+                speaker: speaker.to_string(),
+                text: text.to_string(),
+            },
+            MessageRole::Agent => DisplayLine::Agent {
+                ts,
+                speaker: speaker.to_string(),
+                text: text.to_string(),
+                agent_idx: agent_id
+                    .and_then(|id| self.agent_index_by_id.get(id).copied())
+                    .unwrap_or(0),
+            },
         };
-        self.render_room_line(&line);
+        self.send_display_line(line);
     }
 
     async fn mark_agents_dirty(&self, exclude_agent_id: Option<&str>) {
@@ -460,11 +445,6 @@ pub async fn run_chat(args: ChatArgs) -> Result<()> {
         .map(|item| item.event_seq)
         .max()
         .unwrap_or(0);
-    let resumed_event_count = if resumed_from.is_some() {
-        initial_snapshot.len()
-    } else {
-        0
-    };
     let app_session_id = kernel
         .session_file
         .file_stem()
@@ -473,7 +453,7 @@ pub async fn run_chat(args: ChatArgs) -> Result<()> {
         .to_string();
     room.runtime.app_session_id = Some(app_session_id.clone());
 
-    let (runtime_agents, runtime_root) = initialize_runtime_agent_contexts(&room).await?;
+    let (runtime_agents, _runtime_root) = initialize_runtime_agent_contexts(&room).await?;
 
     let room_hub = Arc::new(RoomHub::new(
         kernel.clone(),
@@ -517,10 +497,15 @@ pub async fn run_chat(args: ChatArgs) -> Result<()> {
     }
 
     let mut worker_state_by_agent_id = HashMap::new();
-    let mut agent_color_by_id = HashMap::new();
+    let mut agent_index_by_id = HashMap::new();
     for (idx, agent) in runtime_agents.iter().enumerate() {
         worker_state_by_agent_id.insert(agent.id.clone(), WorkerState::new());
-        agent_color_by_id.insert(agent.id.clone(), AGENT_COLORS[idx % AGENT_COLORS.len()]);
+        agent_index_by_id.insert(agent.id.clone(), idx);
+    }
+    let (msg_tx, msg_rx) = tokio::sync::mpsc::unbounded_channel::<DisplayLine>();
+    let mut tty_msg_rx = Some(msg_rx);
+    if !is_tty {
+        let _ = tty_msg_rx.take();
     }
 
     let runtime = Arc::new(ChatRuntime {
@@ -533,37 +518,10 @@ pub async fn run_chat(args: ChatArgs) -> Result<()> {
         active_wake_tasks: Arc::new(Mutex::new(Vec::new())),
         observed_event_seq: Arc::new(Mutex::new(initial_observed_event_seq)),
         dry_run: args.dry_run,
-        agent_color_by_id,
-        tty_writer: Arc::new(StdMutex::new(None)),
+        agent_index_by_id,
+        msg_tx,
     });
 
-    runtime.print_system_line(&format!(
-        "Room \"{}\" started. Session log: {}",
-        runtime.room.room_name,
-        runtime
-            .kernel
-            .session_file
-            .strip_prefix(&cwd)
-            .unwrap_or(runtime.kernel.session_file.as_path())
-            .display()
-    ));
-    if resumed_from.is_some() {
-        runtime.print_system_line(&format!(
-            "Session mode: resumed ({} historical events loaded)",
-            resumed_event_count
-        ));
-    } else {
-        runtime.print_system_line("Session mode: new");
-    }
-    runtime.print_system_line(&format!(
-        "Runtime agent context: {}",
-        runtime_root.display()
-    ));
-    if let Some(server) = mcp_server.as_ref() {
-        runtime.print_system_line(&format!("Hub MCP: {}/mcp", server.base_url()?));
-    } else {
-        runtime.print_system_line("Hub MCP: disabled in dry-run mode");
-    }
     runtime.print_system_line(&format!("Human: {}", runtime.room.human));
     runtime.print_system_line(&format!(
         "Agents: {}",
@@ -573,14 +531,6 @@ pub async fn run_chat(args: ChatArgs) -> Result<()> {
             .map(|item| format!("{}[{}]", item.name, item.model))
             .collect::<Vec<_>>()
             .join(", ")
-    ));
-    runtime.print_system_line(&format!(
-        "Scheduler: {} (gather {}ms)",
-        runtime.room.runtime.scheduler_mode, runtime.room.runtime.event_loop.gather_interval_ms
-    ));
-    runtime.print_system_line(&format!(
-        "Rate limit: {} posts / {}ms per agent",
-        runtime.room.runtime.rate_limit.max_posts, runtime.room.runtime.rate_limit.window_ms
     ));
     for warning in &resume_warnings {
         runtime.print_system_line(&format!("[warning] {warning}"));
@@ -607,43 +557,10 @@ pub async fn run_chat(args: ChatArgs) -> Result<()> {
     let mut seen_human_message = false;
 
     if is_tty {
-        let prompt = format!("└─ {}> ", runtime.room.human);
-        let (mut readline, writer) =
-            Readline::new(prompt).context("failed to initialize TTY input")?;
-        // Keep input on a single line and clear submitted prompt/input from screen.
-        readline.should_print_line_on(false, false);
-        runtime.attach_tty_writer(writer);
-
-        loop {
-            let event = readline
-                .readline()
-                .await
-                .context("failed reading TTY input")?;
-            match event {
-                ReadlineEvent::Line(line) => {
-                    let trimmed = line.trim().to_string();
-                    if !trimmed.is_empty() {
-                        let _ = readline.add_history_entry(trimmed.clone());
-                    }
-                    let should_exit = handle_user_input(
-                        runtime.clone(),
-                        trimmed,
-                        &mut seen_human_message,
-                        &mut watchdog_handle,
-                        stop_flag.clone(),
-                    )
-                    .await?;
-
-                    if should_exit {
-                        break;
-                    }
-                }
-                ReadlineEvent::Eof | ReadlineEvent::Interrupted => break,
-            }
-        }
-        let _ = readline.flush();
-        runtime.detach_tty_writer();
-        drop(readline); // disable raw mode before post-loop shutdown logs
+        let msg_rx = tty_msg_rx
+            .take()
+            .ok_or_else(|| anyhow!("internal error: missing TTY display receiver"))?;
+        crate::tui::run_tui_loop(runtime.clone(), msg_rx, stop_flag.clone()).await?;
     } else {
         let mut reader = BufReader::new(tokio::io::stdin());
         let mut line_buf = Vec::new();
@@ -680,13 +597,10 @@ pub async fn run_chat(args: ChatArgs) -> Result<()> {
         server.stop().await?;
     }
 
-    runtime.print_plain_line("");
-    runtime.print_plain_line("Resume this session with:");
     runtime.print_plain_line(&format!(
-        "  {}",
+        "Resume this session with: {}",
         build_resume_hint_command(&args, &app_session_id)
     ));
-    runtime.print_system_line("Chat ended.");
     Ok(())
 }
 
@@ -1089,7 +1003,7 @@ fn decode_user_input_line(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw).trim().to_string()
 }
 
-async fn handle_user_input(
+pub(crate) async fn handle_user_input(
     runtime: Arc<ChatRuntime>,
     user_input: String,
     seen_human_message: &mut bool,

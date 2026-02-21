@@ -242,10 +242,6 @@ fn chat_resume_appends_same_session_file() -> Result<()> {
         250,
     )?;
     assert!(
-        stdout.contains("Session mode: resumed"),
-        "stdout should indicate resumed mode"
-    );
-    assert!(
         stdout.contains("hello-first"),
         "resumed chat should render historical transcript in output"
     );
