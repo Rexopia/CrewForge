@@ -215,6 +215,8 @@ fn ensure_unique_agent_id(name: &str, used_ids: &mut HashSet<String>) -> String 
 fn default_model_for_agent(name: &str) -> String {
     match name.trim().to_lowercase().as_str() {
         "codex" => "openai/gpt-5.3-codex".to_string(),
+        "gemini" => "openrouter/google/gemini-3.1-pro-preview".to_string(),
+        "claude" => "openrouter/anthropic/claude-sonnet-4.6".to_string(),
         "kimi" => "kimi-for-coding/kimi-k2-thinking".to_string(),
         "glm" => "zhipuai-coding-plan/glm-4.7".to_string(),
         _ => "openai/gpt-5.3-codex".to_string(),
