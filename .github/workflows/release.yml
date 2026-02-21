@@ -13,11 +13,12 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             npm_pkg: linux-x64
             bin: crewforge
+            cross: true
           - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
             npm_pkg: linux-arm64
             bin: crewforge
             cross: true
@@ -29,10 +30,6 @@ jobs:
             target: aarch64-apple-darwin
             npm_pkg: darwin-arm64
             bin: crewforge
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            npm_pkg: win32-x64
-            bin: crewforge.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -43,7 +40,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install cross (for arm64 Linux)
+      - name: Install cross (for Linux musl targets)
         if: ${{ matrix.cross }}
         run: cargo install cross --git https://github.com/cross-rs/cross
 
@@ -105,7 +102,8 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          for pkg_dir in npm/crewforge-*/; do
+          for pkg in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
+            pkg_dir="npm/crewforge-$pkg"
             (
               cd "$pkg_dir"
               npm version "$VERSION" --no-git-tag-version --allow-same-version

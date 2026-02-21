@@ -12,8 +12,7 @@
     "@crewforge/linux-x64": "0.1.0",
     "@crewforge/linux-arm64": "0.1.0",
     "@crewforge/darwin-x64": "0.1.0",
-    "@crewforge/darwin-arm64": "0.1.0",
-    "@crewforge/win32-x64": "0.1.0"
+    "@crewforge/darwin-arm64": "0.1.0"
   },
   "engines": {
     "node": ">=18"

@@ -103,17 +103,20 @@
 ## Release Process
 
 - Standard release flow is driven by git tag `vX.Y.Z` and GitHub Actions.
-- For each release, update `Cargo.toml` version first, then run the exact command sequence below.
+- For each release, update `Cargo.toml` version first.
 - Do not manually maintain npm package versions in `package.json`; release workflow syncs versions from the tag.
+- Current npm release targets are:
+  - `@crewforge/linux-x64` (`x86_64-unknown-linux-musl`)
+  - `@crewforge/linux-arm64` (`aarch64-unknown-linux-musl`)
+  - `@crewforge/darwin-x64`
+  - `@crewforge/darwin-arm64`
+- Windows package publishing is currently disabled.
 
 ```bash
-# 1) after updating Cargo.toml version
+# 1) validate before release
 cargo test
-git add .
-git commit -m "chore: bump version to X.Y.Z"
-git push origin main
 
-# 2) trigger npm/github release workflow
+# 2) push the release tag to trigger npm/GitHub release workflow
 git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
