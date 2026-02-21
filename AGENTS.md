@@ -17,5 +17,5 @@
 
 ## Baseline
 
-- Reference baseline tag: `baseline-2026-02-21`.
+- Reference baseline commit: `ebd4a65`.
 - Use this baseline for behavior comparison and regression checks during subsequent iteration.
