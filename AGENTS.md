@@ -14,3 +14,8 @@
 - On resume, the TUI should render session history before showing the input prompt.
 - On resume, historical transcript is context, not unread backlog: initialize all agent read cursors to the current transcript tail.
 - On chat exit, shutdown should be fast: stop watchdog and terminate in-flight wake tasks/processes promptly to avoid user-visible hang.
+
+## Baseline
+
+- Reference baseline tag: `baseline-2026-02-21`.
+- Use this baseline for behavior comparison and regression checks during subsequent iteration.
