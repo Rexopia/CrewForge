@@ -4,10 +4,7 @@
 
 Working with a single AI agent means *you* are the reviewer, the critic, and the detail-polisher on every iteration. CrewForge puts a team of agents in a shared room: they read each other's responses, debate, and converge — you ask once and get a collectively refined answer.
 
-```
-crewforge init    # register your AI profiles globally
-crewforge chat    # pick agents for this project, start talking
-```
+![CrewForge demo — agents brainstorming a tagline together](./assets/demo.jpg)
 
 ## Prerequisites
 
