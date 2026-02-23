@@ -49,5 +49,7 @@ node -e "
 - For non-trivial changes, open an issue first to discuss the direction
 - Make sure `cargo test` passes before submitting
 - Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/):
-  `feat:`, `fix:`, `docs:`, `chore:`, `refactor:`
+  `feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, `perf:`, `test:`, `build:`, `ci:`, `style:`, `revert:`
+- Install local hooks once so invalid commit messages are blocked before commit:
+  `./scripts/install-git-hooks.sh`
 - Keep PRs focused — one concern per PR

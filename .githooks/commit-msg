@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+msg_file="${1:?missing commit message file path}"
+
+subject="$(grep -vE '^[[:space:]]*#' "$msg_file" | head -n1 | tr -d '\r')"
+
+# If there is no subject after comment stripping, do not block here.
+if [[ -z "$subject" ]]; then
+  exit 0
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+"$repo_root/scripts/validate-commit-subject.sh" "$subject"

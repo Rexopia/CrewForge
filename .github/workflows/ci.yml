@@ -7,7 +7,41 @@ on:
     branches: [main]
 
 jobs:
+  commit-message:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate commit messages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git fetch --no-tags origin "${{ github.base_ref }}"
+            range="origin/${{ github.base_ref }}..HEAD"
+          else
+            before="${{ github.event.before }}"
+            if [[ "$before" == "0000000000000000000000000000000000000000" ]]; then
+              range="${{ github.sha }}"
+            else
+              range="$before..${{ github.sha }}"
+            fi
+          fi
+
+          mapfile -t subjects < <(git log --format=%s "$range")
+          if [[ "${#subjects[@]}" -eq 0 ]]; then
+            echo "No commits found in range: $range"
+            exit 0
+          fi
+
+          for subject in "${subjects[@]}"; do
+            ./scripts/validate-commit-subject.sh "$subject"
+          done
+
   test:
+    needs: commit-message
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
