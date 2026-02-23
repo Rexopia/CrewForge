@@ -46,6 +46,7 @@ struct RuntimeAgent {
     model: String,
     runtime_dir: PathBuf,
     hub_token: String,
+    #[allow(dead_code)]
     tools: AgentTools,
 }
 
@@ -1244,6 +1245,7 @@ async fn write_runtime_opencode_configs(
             &config_path,
             &mcp_url,
             &room.opencode.runtime_agent_name,
+            false,
         )
         .await?;
 
@@ -1267,6 +1269,7 @@ async fn update_runtime_opencode_mcp_url(
     config_path: &Path,
     mcp_url: &str,
     runtime_agent_name: &str,
+    allow_edit: bool,
 ) -> Result<bool> {
     let raw = match tokio::fs::read_to_string(config_path).await {
         Ok(text) => text,
@@ -1291,6 +1294,13 @@ async fn update_runtime_opencode_mcp_url(
     }
 
     if !managed_opencode::upsert_mcp_endpoint(&mut config, mcp_url) {
+        return Ok(false);
+    }
+    if !managed_opencode::upsert_runtime_agent_permission(
+        &mut config,
+        runtime_agent_name,
+        allow_edit,
+    ) {
         return Ok(false);
     }
 
@@ -1350,7 +1360,7 @@ fn build_runtime_opencode_config_fallback(
         agent_name,
         members,
         mcp_url,
-        agent.tools.edit || agent.tools.write,
+        false,
         preference,
     )
 }
@@ -1444,6 +1454,59 @@ mod tests {
             resolved,
             cwd.join(".room/sessions/session-2026-02-21T12-34-56-789Z.jsonl")
         );
+    }
+
+    #[tokio::test]
+    async fn update_runtime_opencode_config_refreshes_managed_permission() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("opencode.json");
+
+        let mut config = managed_opencode::build_managed_opencode_config(
+            "brainstorm-room",
+            "Codex",
+            "Rex, Codex",
+            "http://127.0.0.1:1/mcp?token=old",
+            false,
+            None,
+        );
+
+        let permission_obj = config
+            .get_mut("agent")
+            .and_then(|value| value.get_mut("brainstorm-room"))
+            .and_then(|value| value.get_mut("permission"))
+            .and_then(|value| value.as_object_mut())
+            .expect("permission object");
+        permission_obj.remove("bash");
+
+        std::fs::write(
+            &config_path,
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&config).expect("serialize config")
+            ),
+        )
+        .expect("write config");
+
+        let updated = update_runtime_opencode_mcp_url(
+            &config_path,
+            "http://127.0.0.1:2/mcp?token=new",
+            "brainstorm-room",
+            false,
+        )
+        .await
+        .expect("update runtime config");
+        assert!(updated);
+
+        let raw = std::fs::read_to_string(&config_path).expect("read config");
+        let parsed: Value = serde_json::from_str(&raw).expect("parse config");
+        let permission_obj = parsed
+            .get("agent")
+            .and_then(|value| value.get("brainstorm-room"))
+            .and_then(|value| value.get("permission"))
+            .and_then(|value| value.as_object())
+            .expect("permission object");
+        assert!(permission_obj.get("bash").is_some());
+        assert!(permission_obj.get("edit").is_none());
     }
 
     #[test]

@@ -53,7 +53,9 @@ pub struct AgentConfig {
 
 #[derive(Debug, Clone, Default)]
 pub struct AgentTools {
+    #[allow(dead_code)]
     pub edit: bool,
+    #[allow(dead_code)]
     pub write: bool,
 }
 

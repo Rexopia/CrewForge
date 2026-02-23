@@ -5,6 +5,28 @@ pub const HUB_GET_TOOL: &str = "crewforge_hub_get_unread";
 pub const HUB_ACK_TOOL: &str = "crewforge_hub_ack";
 pub const HUB_POST_TOOL: &str = "crewforge_hub_post";
 const MCP_TIMEOUT_MS: u64 = 5000;
+const READONLY_BASH_PATTERNS: &[&str] = &[
+    "ls",
+    "ls *",
+    "cat",
+    "cat *",
+    "head",
+    "head *",
+    "tail",
+    "tail *",
+    "wc",
+    "wc *",
+    "rg",
+    "rg *",
+    "git diff",
+    "git diff *",
+    "git log",
+    "git log *",
+    "git show",
+    "git show *",
+    "git status",
+    "git status *",
+];
 
 pub fn build_members(human: &str, agent_names: impl IntoIterator<Item = String>) -> String {
     std::iter::once(human.to_string())
@@ -38,6 +60,11 @@ pub fn build_managed_agent_prompt(
 }
 
 pub fn build_managed_permission(allow_edit: bool) -> Value {
+    let mut bash = serde_json::Map::new();
+    for pattern in READONLY_BASH_PATTERNS {
+        bash.insert((*pattern).to_string(), json!("allow"));
+    }
+
     let mut permission = json!({
         "*": "deny",
         HUB_GET_TOOL: "allow",
@@ -46,6 +73,7 @@ pub fn build_managed_permission(allow_edit: bool) -> Value {
         "read": "allow",
         "grep": "allow",
         "glob": "allow",
+        "bash": bash,
         "webfetch": "allow",
         "websearch": "allow",
         "question": "deny",
@@ -116,4 +144,50 @@ pub fn upsert_mcp_endpoint(config: &mut Value, mcp_url: &str) -> bool {
     server_obj.insert("url".to_string(), json!(mcp_url));
     server_obj.insert("timeout".to_string(), json!(MCP_TIMEOUT_MS));
     true
+}
+
+pub fn upsert_runtime_agent_permission(
+    config: &mut Value,
+    runtime_agent_name: &str,
+    allow_edit: bool,
+) -> bool {
+    let Some(runtime_agent_obj) = config
+        .get_mut("agent")
+        .and_then(|value| value.as_object_mut())
+        .and_then(|agent| agent.get_mut(runtime_agent_name))
+        .and_then(|value| value.as_object_mut())
+    else {
+        return false;
+    };
+
+    runtime_agent_obj.insert(
+        "permission".to_string(),
+        build_managed_permission(allow_edit),
+    );
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_permission_contains_readonly_bash_allowlist() {
+        let permission = build_managed_permission(false);
+        let bash = permission
+            .get("bash")
+            .and_then(|value| value.as_object())
+            .expect("bash permission object");
+
+        for pattern in READONLY_BASH_PATTERNS {
+            assert_eq!(bash.get(*pattern), Some(&json!("allow")));
+        }
+        assert!(permission.get("edit").is_none());
+    }
+
+    #[test]
+    fn managed_permission_adds_edit_when_requested() {
+        let permission = build_managed_permission(true);
+        assert_eq!(permission.get("edit"), Some(&json!("allow")));
+    }
 }
