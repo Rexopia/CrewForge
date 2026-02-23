@@ -117,19 +117,22 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          npm ci --prefix crewforge-ts
-          npm run build --prefix crewforge-ts
-          node -e "
-            const fs = require('fs');
-            const pkgPath = 'crewforge-ts/package.json';
-            const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-            Object.keys(pkg.optionalDependencies || {}).forEach((k) => {
-              pkg.optionalDependencies[k] = process.env.VERSION;
-            });
-            fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
-          "
-          npm version "$VERSION" --no-git-tag-version --allow-same-version --prefix crewforge-ts
-          npm publish --access public --prefix crewforge-ts
+          (
+            cd crewforge-ts
+            npm ci
+            npm run build
+            node -e "
+              const fs = require('fs');
+              const pkgPath = 'package.json';
+              const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+              Object.keys(pkg.optionalDependencies || {}).forEach((k) => {
+                pkg.optionalDependencies[k] = process.env.VERSION;
+              });
+              fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
+            "
+            npm version "$VERSION" --no-git-tag-version --allow-same-version
+            npm publish --access public
+          )
 
       - name: Create GitHub Release
         env:
