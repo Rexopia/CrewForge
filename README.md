@@ -23,6 +23,13 @@ npm i -g crewforge
 
 Supported platforms: Linux x64/arm64, macOS x64/arm64.
 
+## Repo Layout
+
+This repository is split into two projects:
+
+- `crewforge-rs/` - Rust core runtime (session kernel, scheduler, MCP hub/server, provider integration)
+- `crewforge-ts/` - Node/TypeScript frontend (launcher, chat TUI, JSONL RPC client for Rust core)
+
 ## Quick Start
 
 **1. Register agent profiles** (one-time, global)
@@ -75,6 +82,21 @@ Each agent is an opencode instance with access to your project files and web sea
 - **Any model, any provider** — select from all models opencode supports (OpenAI, Anthropic, Gemini, Kimi, and more)
 - **Persistent sessions** — room history is saved as JSONL; resume any session with `--resume`
 - **Global profiles, per-project rooms** — define agents once with `crewforge init`, use them across any project
+
+## Local Development
+
+```bash
+# Rust core
+cargo test --manifest-path crewforge-rs/Cargo.toml
+
+# Frontend CLI wrapper
+npm test --prefix crewforge-ts
+
+# Run from source
+cargo build --manifest-path crewforge-rs/Cargo.toml
+npm run build --prefix crewforge-ts
+node crewforge-ts/dist/bin/crewforge.js --help
+```
 
 ## Why Not Just Use a Single Agent?
 

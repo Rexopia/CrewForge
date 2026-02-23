@@ -1,0 +1,49 @@
+{
+  "name": "crewforge",
+  "version": "0.1.0",
+  "description": "A virtual team in your terminal: multiple AI agents discuss and converge, so you don't have to iterate alone.",
+  "private": false,
+  "bin": {
+    "crewforge": "dist/bin/crewforge.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/bin/crewforge.js",
+    "test": "npm run build && node --test dist/tests/*.test.js"
+  },
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "optionalDependencies": {
+    "@crewforge/core-linux-x64": "0.1.0",
+    "@crewforge/core-linux-arm64": "0.1.0",
+    "@crewforge/core-darwin-x64": "0.1.0",
+    "@crewforge/core-darwin-arm64": "0.1.0"
+  },
+  "dependencies": {
+    "blessed": "^0.1.81"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/blessed": "^0.1.25",
+    "@types/node": "^22.13.10",
+    "typescript": "^5.8.2"
+  },
+  "license": "MIT",
+  "keywords": [
+    "multi-agent",
+    "agent-orchestration",
+    "mcp",
+    "model-context-protocol",
+    "opencode",
+    "llm",
+    "ai-agents",
+    "cli",
+    "terminal",
+    "multi-agent-chat",
+    "virtual-team",
+    "ai-team"
+  ]
+}

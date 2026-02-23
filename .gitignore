@@ -1,8 +1,11 @@
 /target
+/crewforge-rs/target
 /.room
 /node_modules
-/npm/crewforge-linux-x64/crewforge
-/npm/crewforge-linux-arm64/crewforge
-/npm/crewforge-darwin-x64/crewforge
-/npm/crewforge-darwin-arm64/crewforge
-/npm/crewforge-win32-x64/crewforge.exe
+/crewforge-ts/node_modules
+/crewforge-ts/dist
+/crewforge-rs/npm/crewforge-core-linux-x64/crewforge
+/crewforge-rs/npm/crewforge-core-linux-arm64/crewforge
+/crewforge-rs/npm/crewforge-core-darwin-x64/crewforge
+/crewforge-rs/npm/crewforge-core-darwin-arm64/crewforge
+/crewforge-rs/npm/crewforge-core-win32-x64/crewforge.exe

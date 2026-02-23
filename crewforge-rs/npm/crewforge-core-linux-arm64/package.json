@@ -1,0 +1,14 @@
+{
+  "name": "@crewforge/core-linux-arm64",
+  "version": "0.1.0",
+  "description": "CrewForge core binary for linux-arm64",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "crewforge"
+  ]
+}

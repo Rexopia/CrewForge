@@ -2,8 +2,9 @@
 
 ## Source of Truth
 
-- `src/` is the only source of truth for runtime behavior.
-- If this file conflicts with code, follow `src/` and then update this file.
+- `crewforge-rs/src/` is the source of truth for runtime behavior.
+- `crewforge-ts/src/` is the source of truth for launcher + chat TUI behavior.
+- If this file conflicts with code, follow these directories and then update this file.
 - Do not keep or re-introduce baseline-commit comparison rules in this document.
 
 ## Scope
@@ -15,7 +16,10 @@
 ## CLI Surface
 
 - `crewforge init [--delete <name>]`
-- `crewforge chat [--config <path>] [--resume <session-id|path>] [--dry-run]`
+- `crewforge chat [--config <path>] [--resume <session-id|path>] [--dry-run] [--rpc jsonl]`
+- TS launcher behavior:
+  - If command is `chat`, terminal is TTY, and `--rpc` is not provided: use blessed TUI and force `--rpc jsonl` to Rust core.
+  - If non-TTY or `--rpc` is explicitly provided: bypass TUI and run core CLI mode directly.
 
 ## Global Profiles (`crewforge init`)
 
@@ -79,6 +83,12 @@
 - Watchdog starts after the first human message and ticks by `runtime.eventLoop.gatherIntervalMs`.
 - Exit commands: `/exit` and `/quit`.
 - Informational commands: `/help`, `/agents`.
+- Agent status state machine (source of status dots in TUI):
+  - New human messages mark all agents `dirty`.
+  - New agent messages mark all *other* agents `dirty`.
+  - On wake start, runtime emits `agent.status = active`.
+  - On successful wake finish, runtime emits `agent.status = idle`.
+  - On provider failure, runtime emits `agent.status = error` with reason.
 - Shutdown should be fast:
   - stop flag set
   - watchdog task aborted
@@ -90,9 +100,11 @@
 - Provider command is configurable (`opencode.command`, default `opencode`).
 - Runtime provider calls use `opencode run --format json ... --agent <runtimeAgentName>`.
 - `OPENCODE_CONFIG_DIR` points to each agent runtime dir.
+- Room bootstrap writes `tools.edit = false` and `tools.write = false` by default.
 - CrewForge runs a local MCP server and injects per-agent tokenized URL:
   - `http://127.0.0.1:<port>/mcp?token=<token>`
 - CrewForge-managed prompt includes hub-tool workflow and appends `preference` only when non-empty.
+- Managed permission keeps `edit` denied unless room config enables `tools.edit`.
 
 ## Implementation Guardrails
 
@@ -103,18 +115,19 @@
 ## Release Process
 
 - Standard release flow is driven by git tag `vX.Y.Z` and GitHub Actions.
-- For each release, update `Cargo.toml` version first.
-- Do not manually maintain npm package versions in `package.json`; release workflow syncs versions from the tag.
+- For each release, update `crewforge-rs/Cargo.toml` version first.
+- Do not manually maintain npm package versions in `crewforge-ts/package.json`; release workflow syncs versions from the tag.
 - Current npm release targets are:
-  - `@crewforge/linux-x64` (`x86_64-unknown-linux-musl`)
-  - `@crewforge/linux-arm64` (`aarch64-unknown-linux-musl`)
-  - `@crewforge/darwin-x64`
-  - `@crewforge/darwin-arm64`
+  - `@crewforge/core-linux-x64` (`x86_64-unknown-linux-musl`)
+  - `@crewforge/core-linux-arm64` (`aarch64-unknown-linux-musl`)
+  - `@crewforge/core-darwin-x64`
+  - `@crewforge/core-darwin-arm64`
 - Windows package publishing is currently disabled.
 
 ```bash
 # 1) validate before release
-cargo test
+cargo test --manifest-path crewforge-rs/Cargo.toml
+npm test --prefix crewforge-ts
 
 # 2) push the release tag to trigger npm/GitHub release workflow
 git tag vX.Y.Z

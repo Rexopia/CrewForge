@@ -27,27 +27,26 @@ Open issues at: https://github.com/Rexopia/crewforge/issues
 git clone https://github.com/Rexopia/crewforge.git
 cd crewforge
 
-cargo build          # debug build
-cargo test           # run all tests
-cargo build --release  # release build (the actual binary)
+cargo build --manifest-path crewforge-rs/Cargo.toml
+cargo test --manifest-path crewforge-rs/Cargo.toml
+npm test --prefix crewforge-ts
+cargo build --release --manifest-path crewforge-rs/Cargo.toml
 ```
 
-**Test the npm glue layer locally:**
+**Test the frontend CLI locally:**
 
 ```bash
-cargo build --release
-# point the glue script directly at the local binary
-node -e "
-  process.env.npm_config_prefix = '.';
-  " bin/crewforge.js --version
-# or just run the binary directly:
-./target/release/crewforge --help
+cargo build --manifest-path crewforge-rs/Cargo.toml
+npm run build --prefix crewforge-ts
+node crewforge-ts/dist/bin/crewforge.js --help
+# or explicitly point to core binary:
+CREWFORGE_CORE_BIN=crewforge-rs/target/debug/crewforge node crewforge-ts/dist/bin/crewforge.js chat --help
 ```
 
 ## Pull Requests
 
 - For non-trivial changes, open an issue first to discuss the direction
-- Make sure `cargo test` passes before submitting
+- Make sure `cargo test --manifest-path crewforge-rs/Cargo.toml` passes before submitting
 - Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/):
   `feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, `perf:`, `test:`, `build:`, `ci:`, `style:`, `revert:`
 - Install local hooks once so invalid commit messages are blocked before commit:

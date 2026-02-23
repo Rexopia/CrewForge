@@ -14,21 +14,21 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            npm_pkg: linux-x64
+            npm_pkg: core-linux-x64
             bin: crewforge
             cross: true
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
-            npm_pkg: linux-arm64
+            npm_pkg: core-linux-arm64
             bin: crewforge
             cross: true
           - os: macos-latest
             target: x86_64-apple-darwin
-            npm_pkg: darwin-x64
+            npm_pkg: core-darwin-x64
             bin: crewforge
           - os: macos-latest
             target: aarch64-apple-darwin
-            npm_pkg: darwin-arm64
+            npm_pkg: core-darwin-arm64
             bin: crewforge
 
     steps:
@@ -39,6 +39,8 @@ jobs:
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "crewforge-rs -> crewforge-rs/target"
 
       - name: Install cross (for Linux musl targets)
         if: ${{ matrix.cross }}
@@ -46,23 +48,23 @@ jobs:
 
       - name: Build (native)
         if: ${{ !matrix.cross }}
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} --manifest-path crewforge-rs/Cargo.toml
 
       - name: Build (cross)
         if: ${{ matrix.cross }}
-        run: cross build --release --target ${{ matrix.target }}
+        run: cross build --release --target ${{ matrix.target }} --manifest-path crewforge-rs/Cargo.toml
 
       - name: Copy binary into platform package
         shell: bash
         run: |
-          cp target/${{ matrix.target }}/release/${{ matrix.bin }} \
-            npm/crewforge-${{ matrix.npm_pkg }}/${{ matrix.bin }}
+          bin_path="crewforge-rs/target/${{ matrix.target }}/release/${{ matrix.bin }}"
+          cp "$bin_path" "crewforge-rs/npm/crewforge-${{ matrix.npm_pkg }}/${{ matrix.bin }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.npm_pkg }}
-          path: npm/crewforge-${{ matrix.npm_pkg }}/
+          path: crewforge-rs/npm/crewforge-${{ matrix.npm_pkg }}/
 
   publish:
     name: Publish to npm
@@ -91,19 +93,19 @@ jobs:
         run: |
           for dir in npm-artifacts/*/; do
             pkg=$(basename "$dir")
-            cp -r "$dir"* "npm/crewforge-$pkg/"
+            cp -r "$dir"* "crewforge-rs/npm/crewforge-$pkg/"
           done
-          chmod +x npm/crewforge-linux-x64/crewforge \
-                   npm/crewforge-linux-arm64/crewforge \
-                   npm/crewforge-darwin-x64/crewforge \
-                   npm/crewforge-darwin-arm64/crewforge
+          chmod +x crewforge-rs/npm/crewforge-core-linux-x64/crewforge \
+                   crewforge-rs/npm/crewforge-core-linux-arm64/crewforge \
+                   crewforge-rs/npm/crewforge-core-darwin-x64/crewforge \
+                   crewforge-rs/npm/crewforge-core-darwin-arm64/crewforge
 
       - name: Set version & publish platform packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          for pkg in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
-            pkg_dir="npm/crewforge-$pkg"
+          for pkg in core-linux-x64 core-linux-arm64 core-darwin-x64 core-darwin-arm64; do
+            pkg_dir="crewforge-rs/npm/crewforge-$pkg"
             (
               cd "$pkg_dir"
               npm version "$VERSION" --no-git-tag-version --allow-same-version
@@ -115,16 +117,19 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          npm ci --prefix crewforge-ts
+          npm run build --prefix crewforge-ts
           node -e "
             const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            const pkgPath = 'crewforge-ts/package.json';
+            const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
             Object.keys(pkg.optionalDependencies || {}).forEach((k) => {
               pkg.optionalDependencies[k] = process.env.VERSION;
             });
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+            fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
           "
-          npm version "$VERSION" --no-git-tag-version --allow-same-version
-          npm publish --access public
+          npm version "$VERSION" --no-git-tag-version --allow-same-version --prefix crewforge-ts
+          npm publish --access public --prefix crewforge-ts
 
       - name: Create GitHub Release
         env:
