@@ -28,6 +28,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::task::JoinHandle;
 use tui_textarea::TextArea;
+use unicode_width::UnicodeWidthStr;
 
 use crate::chat::{ChatRuntime, handle_user_input};
 use crate::kernel::MessageEvent;
@@ -609,21 +610,36 @@ fn cursor_visual_position(textarea: &TextArea, content_width: u16) -> (usize, us
     let mut visual_row = 0_usize;
 
     for line in lines.iter().take(cursor_row) {
-        let line_len = line.chars().count();
-        let wrapped_rows = if line_len == 0 {
+        let display_width = UnicodeWidthStr::width(line.as_str());
+        let wrapped_rows = if display_width == 0 {
             1
         } else {
-            line_len.saturating_sub(1) / width + 1
+            display_width.saturating_sub(1) / width + 1
         };
         visual_row = visual_row.saturating_add(wrapped_rows);
     }
 
-    let current_line_len = lines[cursor_row].chars().count();
+    let current_line = lines[cursor_row].as_str();
+    let current_line_len = current_line.chars().count();
     let cursor_col = cursor_col.min(current_line_len);
-    visual_row = visual_row.saturating_add(cursor_col / width);
-    let visual_col = cursor_col % width;
+    let cursor_display_col = display_width_for_char_prefix(current_line, cursor_col);
+    visual_row = visual_row.saturating_add(cursor_display_col / width);
+    let visual_col = cursor_display_col % width;
 
     (visual_row, visual_col)
+}
+
+fn display_width_for_char_prefix(line: &str, char_count: usize) -> usize {
+    if char_count == 0 {
+        return 0;
+    }
+
+    let split_at = line
+        .char_indices()
+        .nth(char_count)
+        .map(|(byte_idx, _)| byte_idx)
+        .unwrap_or(line.len());
+    UnicodeWidthStr::width(&line[..split_at])
 }
 
 fn input_rendered_line_count(textarea: &TextArea, content_width: u16) -> usize {
@@ -972,5 +988,23 @@ mod tests {
 
         let (row, col) = cursor_visual_position(&textarea, 5);
         assert_eq!((row, col), (1, 1));
+    }
+
+    #[test]
+    fn cursor_visual_position_accounts_for_wide_char_width() {
+        let mut textarea = TextArea::default();
+        textarea.insert_str("你好a");
+
+        let (row, col) = cursor_visual_position(&textarea, 4);
+        assert_eq!((row, col), (1, 1));
+    }
+
+    #[test]
+    fn cursor_visual_position_counts_wrapped_wide_lines_before_cursor_row() {
+        let mut textarea = TextArea::default();
+        textarea.insert_str("你好你好\nx");
+
+        let (row, col) = cursor_visual_position(&textarea, 4);
+        assert_eq!((row, col), (2, 1));
     }
 }

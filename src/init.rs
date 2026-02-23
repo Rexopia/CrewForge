@@ -16,6 +16,8 @@ pub struct InitArgs {
 }
 
 pub async fn run_init(args: InitArgs) -> Result<()> {
+    crate::update::maybe_print_update_notice().await;
+
     let profiles_path = profiles::global_profiles_path()?;
 
     if let Some(name) = args.delete {

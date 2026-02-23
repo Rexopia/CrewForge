@@ -436,6 +436,8 @@ impl ChatRuntime {
 }
 
 pub async fn run_chat(args: ChatArgs) -> Result<()> {
+    crate::update::maybe_print_update_notice().await;
+
     let cwd = std::env::current_dir().context("failed to resolve current dir")?;
     let config_path = cwd.join(Path::new(&args.config_path));
     let is_tty = std::io::stdin().is_terminal();

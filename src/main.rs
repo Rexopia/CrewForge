@@ -11,6 +11,7 @@ mod provider;
 mod scheduler;
 mod text;
 mod tui;
+mod update;
 
 use clap::{Args, Parser, Subcommand};
 
