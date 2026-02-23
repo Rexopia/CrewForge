@@ -135,6 +135,10 @@ impl SessionKernel {
     pub async fn transcript_snapshot(&self) -> Vec<MessageEvent> {
         self.state.lock().await.transcript.clone()
     }
+
+    pub async fn latest_event_seq(&self) -> u64 {
+        self.state.lock().await.next_event_seq.saturating_sub(1)
+    }
 }
 
 fn create_session_filename() -> String {

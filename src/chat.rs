@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::config::{AgentConfig, AgentTools, RoomConfig, load_room_config};
 use crate::hub::{RateLimitUsage, RoomHub};
-use crate::kernel::{MessageRole, SessionKernel};
+use crate::kernel::{MessageEvent, MessageRole, SessionKernel};
 use crate::managed_opencode::{self, HUB_ACK_TOOL, HUB_GET_TOOL, HUB_POST_TOOL};
 use crate::mcp_server::RoomHubMcpServer;
 use crate::profiles::{self, GlobalProfile};
@@ -117,6 +117,46 @@ impl ChatRuntime {
         &self.room.human
     }
 
+    pub(crate) fn session_file_path(&self) -> PathBuf {
+        self.kernel.session_file.clone()
+    }
+
+    pub(crate) fn display_line_for_event(&self, event: &MessageEvent) -> DisplayLine {
+        self.build_display_line(
+            &event.role,
+            &event.speaker,
+            &event.text,
+            &event.ts,
+            event.agent_id.as_deref(),
+        )
+    }
+
+    fn build_display_line(
+        &self,
+        role: &MessageRole,
+        speaker: &str,
+        text: &str,
+        ts: &str,
+        agent_id: Option<&str>,
+    ) -> DisplayLine {
+        let ts = format_time(ts);
+        match role {
+            MessageRole::Human => DisplayLine::Human {
+                ts,
+                speaker: speaker.to_string(),
+                text: text.to_string(),
+            },
+            MessageRole::Agent => DisplayLine::Agent {
+                ts,
+                speaker: speaker.to_string(),
+                text: text.to_string(),
+                agent_idx: agent_id
+                    .and_then(|id| self.agent_index_by_id.get(id).copied())
+                    .unwrap_or(0),
+            },
+        }
+    }
+
     fn print_system_line(&self, text: &str) {
         self.send_display_line(DisplayLine::System(text.to_string()));
     }
@@ -139,23 +179,7 @@ impl ChatRuntime {
         ts: &str,
         agent_id: Option<&str>,
     ) {
-        let ts = format_time(ts);
-        let line = match role {
-            MessageRole::Human => DisplayLine::Human {
-                ts,
-                speaker: speaker.to_string(),
-                text: text.to_string(),
-            },
-            MessageRole::Agent => DisplayLine::Agent {
-                ts,
-                speaker: speaker.to_string(),
-                text: text.to_string(),
-                agent_idx: agent_id
-                    .and_then(|id| self.agent_index_by_id.get(id).copied())
-                    .unwrap_or(0),
-            },
-        };
-        self.send_display_line(line);
+        self.send_display_line(self.build_display_line(role, speaker, text, ts, agent_id));
     }
 
     async fn mark_agents_dirty(&self, exclude_agent_id: Option<&str>) {
@@ -439,12 +463,12 @@ pub async fn run_chat(args: ChatArgs) -> Result<()> {
 
     ensure_room_agent_configs(&cwd, &room).await?;
 
-    let initial_snapshot = kernel.transcript_snapshot().await;
-    let initial_observed_event_seq = initial_snapshot
-        .iter()
-        .map(|item| item.event_seq)
-        .max()
-        .unwrap_or(0);
+    let initial_observed_event_seq = kernel.latest_event_seq().await;
+    let initial_snapshot_for_stdout = if !is_tty && resumed_from.is_some() {
+        Some(kernel.transcript_snapshot().await)
+    } else {
+        None
+    };
     let app_session_id = kernel
         .session_file
         .file_stem()
@@ -522,26 +546,32 @@ pub async fn run_chat(args: ChatArgs) -> Result<()> {
         msg_tx,
     });
 
-    runtime.print_system_line(&format!("Human: {}", runtime.room.human));
-    runtime.print_system_line(&format!(
-        "Agents: {}",
-        runtime
-            .runtime_agents
-            .iter()
-            .map(|item| format!("{}[{}]", item.name, item.model))
-            .collect::<Vec<_>>()
-            .join(", ")
-    ));
+    let show_startup_banner = !is_tty || resumed_from.is_none();
+    if show_startup_banner {
+        runtime.print_system_line(&format!("Root: {}", runtime.room.workspace_dir.display()));
+        runtime.print_system_line(&format!("Human: {}", runtime.room.human));
+        runtime.print_system_line(&format!(
+            "Agents: {}",
+            runtime
+                .runtime_agents
+                .iter()
+                .map(|item| format!("{}[{}]", item.name, item.model))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     for warning in &resume_warnings {
         runtime.print_system_line(&format!("[warning] {warning}"));
     }
-    if args.dry_run {
+    if args.dry_run && show_startup_banner {
         runtime.print_system_line("Running in dry-run mode (no provider calls).");
     }
-    runtime.print_system_line("Type /help for commands.");
-    if resumed_from.is_some() && !initial_snapshot.is_empty() {
+    if show_startup_banner {
+        runtime.print_system_line("Type /help for commands.");
+    }
+    if let Some(initial_snapshot) = initial_snapshot_for_stdout.as_ref() {
         runtime.print_system_line("Loaded session history:");
-        for event in &initial_snapshot {
+        for event in initial_snapshot {
             runtime.print_message(
                 &event.role,
                 &event.speaker,
@@ -560,7 +590,13 @@ pub async fn run_chat(args: ChatArgs) -> Result<()> {
         let msg_rx = tty_msg_rx
             .take()
             .ok_or_else(|| anyhow!("internal error: missing TTY display receiver"))?;
-        crate::tui::run_tui_loop(runtime.clone(), msg_rx, stop_flag.clone()).await?;
+        crate::tui::run_tui_loop(
+            runtime.clone(),
+            msg_rx,
+            stop_flag.clone(),
+            runtime.session_file_path(),
+        )
+        .await?;
     } else {
         let mut reader = BufReader::new(tokio::io::stdin());
         let mut line_buf = Vec::new();
@@ -1084,7 +1120,7 @@ fn spawn_watchdog(
 }
 
 fn help_text() -> &'static str {
-    "Usage:\n  crewforge chat\n  crewforge chat --dry-run\n  crewforge chat --resume <session-id|path>\n\nCommands:\n  /help    Show help\n  /agents  List members\n  /exit    Quit chat\n  /quit    Quit chat (alias)\n\nScheduler:\n  event_loop (5s gather watchdog)\n\nNotes:\n- Default mode creates a fresh room session.\n- `--resume` appends to an existing session log.\n- Agent config dirs are persistent (for example .room/agents/<id>/opencode.json).\n- CrewForge refreshes MCP runtime endpoint in managed opencode.json files."
+    "Commands:\n  /help    Show help\n  /agents  List members\n  /exit    Quit chat\n  /quit    Quit chat (alias)\n\nInput:\n  Enter            Send message\n  Ctrl+J           Insert newline\n  Ctrl+C           Clear current input\n  Ctrl+D           Exit chat\n\nNavigation:\n  PageUp/PageDown  Scroll chat (3 lines)\n  Home/End         Jump to top/bottom\n  Alt+Up/Down      Scroll chat (1 line)\n  Ctrl+Up/Down     Scroll chat (1 line)\n\nSession:\n  Resume: crewforge chat --resume <session-id|path>"
 }
 
 fn build_event_turn_prompt(
@@ -1328,6 +1364,10 @@ mod tests {
         assert!(help_text().contains("crewforge chat"));
         assert!(!help_text().contains("npm run chat"));
         assert!(help_text().contains("--resume"));
+        assert!(help_text().contains("PageUp/PageDown"));
+        assert!(help_text().contains("Ctrl+J"));
+        assert!(help_text().contains("Ctrl+C"));
+        assert!(help_text().contains("Ctrl+D"));
     }
 
     #[test]
