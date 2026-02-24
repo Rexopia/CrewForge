@@ -123,6 +123,8 @@
 
 - Standard release flow is driven by git tag `vX.Y.Z` and GitHub Actions.
 - For each release, update `crewforge-rs/Cargo.toml` version first.
+- Release tag must exactly match `crewforge-rs/Cargo.toml` package version (tag `vX.Y.Z` <-> Cargo `X.Y.Z`) before tag creation/push.
+- If a release tag was pushed with mismatched Cargo version, do not force-move/rewrite the tag; bump to the next patch version and publish a new tag.
 - Do not manually maintain npm package versions in `crewforge-ts/package.json`; release workflow syncs versions from the tag.
 - After the Rust TUI consolidation, releases should start from `v0.3.0+` and continue from the Rust core version.
 - Current npm release targets are:
@@ -144,6 +146,14 @@ CREWFORGE_CORE_BIN="$(pwd)/crewforge-rs/target/release/crewforge" \
   node crewforge-ts/dist/bin/crewforge.js --version
 CREWFORGE_CORE_BIN="$(pwd)/crewforge-rs/target/release/crewforge" \
   node crewforge-ts/dist/bin/crewforge.js chat --dry-run
+
+# 1.2) hard gate: release tag must match Cargo version
+REL_TAG="vX.Y.Z"
+CARGO_VERSION="$(awk -F '\"' '/^version = / {print $2; exit}' crewforge-rs/Cargo.toml)"
+if [ "$REL_TAG" != "v$CARGO_VERSION" ]; then
+  echo "release blocked: tag=$REL_TAG cargo=v$CARGO_VERSION"
+  exit 1
+fi
 
 # 2) push the release tag to trigger npm/GitHub release workflow
 git tag vX.Y.Z
