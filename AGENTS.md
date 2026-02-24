@@ -3,7 +3,7 @@
 ## Source of Truth
 
 - `crewforge-rs/src/` is the source of truth for runtime behavior.
-- `crewforge-ts/src/` is the source of truth for launcher + chat TUI behavior.
+- `crewforge-ts/src/` is the source of truth for launcher behavior.
 - If this file conflicts with code, follow these directories and then update this file.
 - Do not keep or re-introduce baseline-commit comparison rules in this document.
 
@@ -18,8 +18,8 @@
 - `crewforge init [--delete <name>]`
 - `crewforge chat [--config <path>] [--resume <session-id|path>] [--dry-run] [--rpc jsonl]`
 - TS launcher behavior:
-  - If command is `chat`, terminal is TTY, and `--rpc` is not provided: use blessed TUI and force `--rpc jsonl` to Rust core.
-  - If non-TTY or `--rpc` is explicitly provided: bypass TUI and run core CLI mode directly.
+  - Always launch the Rust core binary and forward stdio (`inherit`).
+  - Do not add implicit `--rpc` flags.
 
 ## Global Profiles (`crewforge init`)
 
@@ -95,12 +95,11 @@
   - in-flight wake tasks awaited with a short timeout, then aborted
   - MCP server stopped with graceful shutdown timeout fallback
 
-## TUI Pipe Safety
+## Launcher Safety
 
-- `crewforge-ts/src/chat/run-chat-ui.ts` must handle `child.stdin` stream errors.
-- Treat `EPIPE` and `ERR_STREAM_DESTROYED` as expected race conditions after core exit or stdin close.
-- Do not let `child.stdin.write(...)` related errors crash the launcher process.
-- Keep a regression test for this behavior in `crewforge-ts/src/tests/` whenever TUI command wiring changes.
+- `crewforge-ts/src/bin/crewforge.ts` must remain a thin process launcher.
+- Forward `SIGINT`, `SIGTERM`, `SIGHUP` from launcher to core child process.
+- Keep launcher tests for argument forwarding and signal/exit-code propagation.
 - Before release tags, verify local/global launcher behavior by running `npm test --prefix crewforge-ts` and checking a TTY `crewforge chat` invocation.
 
 ## Opencode + MCP Integration

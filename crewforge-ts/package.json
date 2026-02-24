@@ -7,7 +7,7 @@
     "crewforge": "dist/bin/crewforge.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && chmod +x dist/bin/crewforge.js",
+    "build": "node -e \"require('node:fs').rmSync('dist',{ recursive: true, force: true })\" && tsc -p tsconfig.json && chmod +x dist/bin/crewforge.js",
     "test": "npm run build && node --test dist/tests/*.test.js"
   },
   "files": [
@@ -20,14 +20,11 @@
     "@crewforge/core-darwin-x64": "0.1.0",
     "@crewforge/core-darwin-arm64": "0.1.0"
   },
-  "dependencies": {
-    "blessed": "^0.1.81"
-  },
+  "dependencies": {},
   "engines": {
     "node": ">=18"
   },
   "devDependencies": {
-    "@types/blessed": "^0.1.25",
     "@types/node": "^22.13.10",
     "typescript": "^5.8.2"
   },

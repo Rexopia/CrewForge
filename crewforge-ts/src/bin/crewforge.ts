@@ -4,7 +4,6 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import os from "node:os";
-import { runChatWithUi, shouldUseChatUi } from "../chat/run-chat-ui";
 
 const PACKAGES: Record<string, string> = {
   "linux-x64": "@crewforge/core-linux-x64",
@@ -123,11 +122,6 @@ async function run(): Promise<number> {
   }
 
   const args = process.argv.slice(2);
-  const command = args[0];
-  if (command === "chat" && shouldUseChatUi(args)) {
-    return runChatWithUi(binaryPath, args);
-  }
-
   return runCoreInherit(binaryPath, args);
 }
 

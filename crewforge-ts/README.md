@@ -3,7 +3,7 @@
 TypeScript/Node frontend package for CrewForge.
 
 - Resolves and launches the platform-specific CrewForge core binary package.
-- Runs the interactive chat TUI (blessed) and talks to Rust core via JSONL RPC.
+- Acts as a thin launcher only (`spawn + stdio: inherit`).
 - Supports local development fallback to `../crewforge-rs/target/debug/crewforge`.
 
 Install:

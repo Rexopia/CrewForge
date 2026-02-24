@@ -28,7 +28,7 @@ Supported platforms: Linux x64/arm64, macOS x64/arm64.
 This repository is split into two projects:
 
 - `crewforge-rs/` - Rust core runtime (session kernel, scheduler, MCP hub/server, provider integration)
-- `crewforge-ts/` - Node/TypeScript frontend (launcher, chat TUI, JSONL RPC client for Rust core)
+- `crewforge-ts/` - Node/TypeScript launcher (binary resolution, process/signal forwarding)
 
 ## Quick Start
 
