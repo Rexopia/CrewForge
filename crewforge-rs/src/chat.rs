@@ -119,6 +119,14 @@ impl ChatRuntime {
         &self.room.human
     }
 
+    pub(crate) fn agent_names(&self) -> Vec<String> {
+        self.room
+            .agents
+            .iter()
+            .map(|agent| agent.name.clone())
+            .collect()
+    }
+
     pub(crate) fn session_file_path(&self) -> PathBuf {
         self.kernel.session_file.clone()
     }
@@ -1429,7 +1437,7 @@ fn spawn_watchdog(
 }
 
 fn help_text() -> &'static str {
-    "Commands:\n  /help    Show help\n  /agents  List members\n  /exit    Quit chat\n  /quit    Quit chat (alias)\n\nInput:\n  Enter            Send message\n  Ctrl+J           Insert newline\n  Ctrl+C           Clear current input\n  Ctrl+D           Exit chat\n\nNavigation:\n  PageUp/PageDown  Scroll chat (3 lines)\n  Home/End         Jump to top/bottom\n  Alt+Up/Down      Scroll chat (1 line)\n  Ctrl+Up/Down     Scroll chat (1 line)\n\nSession:\n  Resume: crewforge chat --resume <session-id|path>"
+    "Commands:\n  /help    Show help\n  /agents  List members\n  /exit    Quit chat\n  /quit    Quit chat (alias)\n\nInput:\n  Enter            Send message\n  Ctrl+J           Insert newline\n  Ctrl+C           Clear current input\n  Ctrl+D           Exit chat\n\nNavigation:\n  PageUp/PageDown  Scroll chat (3 lines)\n  Ctrl+P/N         Scroll chat (3 lines)\n  Home/End         Jump to top/bottom\n  Alt+Up/Down      Scroll chat (1 line)\n  Ctrl+Up/Down     Scroll chat (1 line)\n\nSession:\n  Resume: crewforge chat --resume <session-id|path>"
 }
 
 fn build_event_turn_prompt(
@@ -1683,6 +1691,7 @@ mod tests {
         assert!(!help_text().contains("npm run chat"));
         assert!(help_text().contains("--resume"));
         assert!(help_text().contains("PageUp/PageDown"));
+        assert!(help_text().contains("Ctrl+P/N"));
         assert!(help_text().contains("Ctrl+J"));
         assert!(help_text().contains("Ctrl+C"));
         assert!(help_text().contains("Ctrl+D"));
