@@ -95,6 +95,14 @@
   - in-flight wake tasks awaited with a short timeout, then aborted
   - MCP server stopped with graceful shutdown timeout fallback
 
+## TUI Pipe Safety
+
+- `crewforge-ts/src/chat/run-chat-ui.ts` must handle `child.stdin` stream errors.
+- Treat `EPIPE` and `ERR_STREAM_DESTROYED` as expected race conditions after core exit or stdin close.
+- Do not let `child.stdin.write(...)` related errors crash the launcher process.
+- Keep a regression test for this behavior in `crewforge-ts/src/tests/` whenever TUI command wiring changes.
+- Before release tags, verify local/global launcher behavior by running `npm test --prefix crewforge-ts` and checking a TTY `crewforge chat` invocation.
+
 ## Opencode + MCP Integration
 
 - Provider command is configurable (`opencode.command`, default `opencode`).

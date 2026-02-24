@@ -1,7 +1,11 @@
 import assert from "node:assert";
 import { test } from "node:test";
 
-import { encodeInputCommand, shouldUseChatUi } from "../chat/run-chat-ui";
+import {
+  encodeInputCommand,
+  shouldIgnoreChildStdinError,
+  shouldUseChatUi,
+} from "../chat/run-chat-ui";
 
 test("encodeInputCommand emits jsonl payload", () => {
   assert.strictEqual(
@@ -12,4 +16,19 @@ test("encodeInputCommand emits jsonl payload", () => {
 
 test("shouldUseChatUi disables UI when --rpc is explicit", () => {
   assert.strictEqual(shouldUseChatUi(["chat", "--rpc", "jsonl"]), false);
+});
+
+test("shouldIgnoreChildStdinError only suppresses expected pipe races", () => {
+  assert.strictEqual(
+    shouldIgnoreChildStdinError({ code: "EPIPE" } as NodeJS.ErrnoException),
+    true,
+  );
+  assert.strictEqual(
+    shouldIgnoreChildStdinError({ code: "ERR_STREAM_DESTROYED" } as NodeJS.ErrnoException),
+    true,
+  );
+  assert.strictEqual(
+    shouldIgnoreChildStdinError({ code: "EINVAL" } as NodeJS.ErrnoException),
+    false,
+  );
 });

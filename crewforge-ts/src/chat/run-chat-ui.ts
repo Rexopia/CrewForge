@@ -33,6 +33,10 @@ function withJsonlRpcFlag(args: string[]): string[] {
   return [...args, "--rpc", "jsonl"];
 }
 
+export function shouldIgnoreChildStdinError(error: NodeJS.ErrnoException): boolean {
+  return error.code === "EPIPE" || error.code === "ERR_STREAM_DESTROYED";
+}
+
 export async function runChatWithUi(binary: string, rawArgs: string[]): Promise<number> {
   const childArgs = withJsonlRpcFlag(rawArgs);
   const child = spawn(binary, childArgs, {
@@ -42,6 +46,15 @@ export async function runChatWithUi(binary: string, rawArgs: string[]): Promise<
 
   const state = new ChatStateStore();
   let forceExitTimer: NodeJS.Timeout | undefined;
+
+  const handleStdinError = (error: NodeJS.ErrnoException): void => {
+    if (shouldIgnoreChildStdinError(error)) {
+      return;
+    }
+    const message = error.message ?? String(error);
+    state.appendClientNotice(`[input pipe] ${message}`);
+  };
+  child.stdin?.on("error", handleStdinError);
 
   const sendCommand = (command: RpcCommand): void => {
     if (!child.stdin || child.stdin.destroyed || !child.stdin.writable) {
