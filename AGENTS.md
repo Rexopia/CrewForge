@@ -124,6 +124,7 @@
 - Standard release flow is driven by git tag `vX.Y.Z` and GitHub Actions.
 - For each release, update `crewforge-rs/Cargo.toml` version first.
 - Do not manually maintain npm package versions in `crewforge-ts/package.json`; release workflow syncs versions from the tag.
+- After the Rust TUI consolidation, releases should start from `v0.3.0+` and continue from the Rust core version.
 - Current npm release targets are:
   - `@crewforge/core-linux-x64` (`x86_64-unknown-linux-musl`)
   - `@crewforge/core-linux-arm64` (`aarch64-unknown-linux-musl`)
@@ -133,8 +134,16 @@
 
 ```bash
 # 1) validate before release
+cargo clippy --manifest-path crewforge-rs/Cargo.toml --all-targets
 cargo test --manifest-path crewforge-rs/Cargo.toml
 npm test --prefix crewforge-ts
+cargo build --release --manifest-path crewforge-rs/Cargo.toml
+
+# 1.1) launcher + core smoke
+CREWFORGE_CORE_BIN="$(pwd)/crewforge-rs/target/release/crewforge" \
+  node crewforge-ts/dist/bin/crewforge.js --version
+CREWFORGE_CORE_BIN="$(pwd)/crewforge-rs/target/release/crewforge" \
+  node crewforge-ts/dist/bin/crewforge.js chat --dry-run
 
 # 2) push the release tag to trigger npm/GitHub release workflow
 git tag vX.Y.Z
