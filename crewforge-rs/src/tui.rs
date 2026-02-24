@@ -4,6 +4,7 @@ use std::io::{BufRead, BufReader, ErrorKind, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::event::{
@@ -28,6 +29,7 @@ use serde_json::from_str;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::task::JoinHandle;
+use tokio::time::sleep;
 use tui_textarea::TextArea;
 use unicode_width::UnicodeWidthStr;
 
@@ -40,6 +42,19 @@ const INPUT_CHROME_ROWS: u16 = 2;
 const STATUS_BAR_ROWS: u16 = 1;
 const KEY_SCROLL_STEP: u16 = 3;
 const HISTORY_PAGE_MESSAGES: usize = 200;
+const TUI_TICK_INTERVAL: Duration = Duration::from_millis(16);
+const PASTE_BURST_MIN_CHARS: u16 = 3;
+const PASTE_ENTER_SUPPRESS_WINDOW: Duration = Duration::from_millis(120);
+
+#[cfg(not(windows))]
+const PASTE_BURST_CHAR_INTERVAL: Duration = Duration::from_millis(8);
+#[cfg(windows)]
+const PASTE_BURST_CHAR_INTERVAL: Duration = Duration::from_millis(30);
+
+#[cfg(not(windows))]
+const PASTE_BURST_ACTIVE_IDLE_TIMEOUT: Duration = Duration::from_millis(8);
+#[cfg(windows)]
+const PASTE_BURST_ACTIVE_IDLE_TIMEOUT: Duration = Duration::from_millis(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AgentStatusState {
@@ -58,6 +73,119 @@ struct AgentStatusEntry {
 impl Default for AgentStatusState {
     fn default() -> Self {
         Self::Unknown
+    }
+}
+
+#[derive(Debug, Default)]
+struct PasteBurst {
+    last_plain_char_time: Option<Instant>,
+    consecutive_plain_chars: u16,
+    burst_window_until: Option<Instant>,
+    buffer: String,
+    active: bool,
+    pending_first_char: Option<(char, Instant)>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PasteFlushResult {
+    None,
+    Typed(char),
+    Paste(String),
+}
+
+impl PasteBurst {
+    fn on_plain_char(&mut self, ch: char, now: Instant) {
+        self.note_plain_char(now);
+        if self.active {
+            self.buffer.push(ch);
+            self.burst_window_until = Some(now + PASTE_ENTER_SUPPRESS_WINDOW);
+            return;
+        }
+
+        if let Some((held, held_at)) = self.pending_first_char
+            && now.duration_since(held_at) <= PASTE_BURST_CHAR_INTERVAL
+        {
+            self.active = true;
+            self.pending_first_char = None;
+            self.buffer.push(held);
+            self.buffer.push(ch);
+            self.burst_window_until = Some(now + PASTE_ENTER_SUPPRESS_WINDOW);
+            return;
+        }
+
+        self.pending_first_char = Some((ch, now));
+    }
+
+    fn flush_if_due(&mut self, now: Instant) -> PasteFlushResult {
+        if self.active {
+            if let Some(last) = self.last_plain_char_time
+                && now.duration_since(last) > PASTE_BURST_ACTIVE_IDLE_TIMEOUT
+            {
+                self.active = false;
+                if !self.buffer.is_empty() {
+                    return PasteFlushResult::Paste(std::mem::take(&mut self.buffer));
+                }
+            }
+            return PasteFlushResult::None;
+        }
+
+        if let Some((held, held_at)) = self.pending_first_char
+            && now.duration_since(held_at) > PASTE_BURST_CHAR_INTERVAL
+        {
+            self.pending_first_char = None;
+            return PasteFlushResult::Typed(held);
+        }
+
+        PasteFlushResult::None
+    }
+
+    fn flush_before_non_char(&mut self) -> PasteFlushResult {
+        self.consecutive_plain_chars = 0;
+        self.last_plain_char_time = None;
+        if self.active {
+            self.active = false;
+            if !self.buffer.is_empty() {
+                return PasteFlushResult::Paste(std::mem::take(&mut self.buffer));
+            }
+        }
+
+        if let Some((held, _)) = self.pending_first_char.take() {
+            return PasteFlushResult::Typed(held);
+        }
+
+        PasteFlushResult::None
+    }
+
+    fn should_treat_enter_as_newline(&self, now: Instant) -> bool {
+        self.active
+            || self
+                .burst_window_until
+                .is_some_and(|deadline| now <= deadline)
+    }
+
+    fn clear_window_after_non_char(&mut self) {
+        self.consecutive_plain_chars = 0;
+        self.last_plain_char_time = None;
+    }
+
+    fn needs_tick(&self) -> bool {
+        self.active || self.pending_first_char.is_some()
+    }
+
+    fn note_plain_char(&mut self, now: Instant) {
+        if let Some(last) = self.last_plain_char_time {
+            if now.duration_since(last) <= PASTE_BURST_CHAR_INTERVAL {
+                self.consecutive_plain_chars = self.consecutive_plain_chars.saturating_add(1);
+            } else {
+                self.consecutive_plain_chars = 1;
+            }
+        } else {
+            self.consecutive_plain_chars = 1;
+        }
+        self.last_plain_char_time = Some(now);
+        if self.consecutive_plain_chars >= PASTE_BURST_MIN_CHARS {
+            self.burst_window_until = Some(now + PASTE_ENTER_SUPPRESS_WINDOW);
+        }
     }
 }
 
@@ -265,6 +393,26 @@ fn handle_display_line(
     }
 }
 
+fn apply_paste_flush(textarea: &mut TextArea, flush: PasteFlushResult) {
+    match flush {
+        PasteFlushResult::None => {}
+        PasteFlushResult::Typed(ch) => textarea.insert_char(ch),
+        PasteFlushResult::Paste(text) => {
+            let _ = textarea.insert_str(&text);
+        }
+    }
+}
+
+fn key_plain_char(key: &KeyEvent) -> Option<char> {
+    if !key.modifiers.is_empty() {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char(ch) if !ch.is_control() => Some(ch),
+        _ => None,
+    }
+}
+
 struct TerminalGuard;
 
 impl Drop for TerminalGuard {
@@ -413,6 +561,7 @@ pub async fn run_tui_loop(
     let mut auto_scroll = true;
     let mut rendered_line_cache = RenderedLineCache::default();
     let mut event_stream = EventStream::new();
+    let mut paste_burst = PasteBurst::default();
     let mut watchdog_handle: Option<JoinHandle<()>> = None;
     let mut seen_human_message = false;
 
@@ -475,15 +624,27 @@ pub async fn run_tui_loop(
                             continue;
                         }
 
+                        let now = Instant::now();
+                        apply_paste_flush(&mut textarea, paste_burst.flush_if_due(now));
+
                         if is_exit_key(&key) {
                             stop_flag.store(true, Ordering::SeqCst);
                             break 'main;
                         }
 
                         if is_clear_input_key(&key) {
+                            paste_burst = PasteBurst::default();
                             textarea = build_textarea(&prompt);
                             continue;
                         }
+
+                        if let Some(ch) = key_plain_char(&key) {
+                            paste_burst.on_plain_char(ch, now);
+                            continue;
+                        }
+
+                        apply_paste_flush(&mut textarea, paste_burst.flush_before_non_char());
+                        paste_burst.clear_window_after_non_char();
 
                         if is_scroll_up(&key) {
                             auto_scroll = false;
@@ -542,7 +703,9 @@ pub async fn run_tui_loop(
                             continue;
                         }
 
-                        if is_newline_key(&key) {
+                        if is_newline_key(&key)
+                            || (is_submit_key(&key) && paste_burst.should_treat_enter_as_newline(now))
+                        {
                             textarea.insert_newline();
                             continue;
                         }
@@ -570,10 +733,14 @@ pub async fn run_tui_loop(
                         textarea.input(key);
                     }
                     Some(Ok(Event::Paste(data))) => {
+                        apply_paste_flush(&mut textarea, paste_burst.flush_before_non_char());
+                        paste_burst.clear_window_after_non_char();
                         textarea.insert_str(normalize_newlines(&data));
                         continue;
                     }
                     Some(Ok(Event::Resize(new_width, new_height))) => {
+                        apply_paste_flush(&mut textarea, paste_burst.flush_before_non_char());
+                        paste_burst.clear_window_after_non_char();
                         (view_height, view_width) = message_view_dimensions(
                             Rect::new(0, 0, new_width, new_height),
                             &textarea,
@@ -597,6 +764,9 @@ pub async fn run_tui_loop(
                     }
                     None => break 'main,
                 }
+            }
+            _ = sleep(TUI_TICK_INTERVAL), if paste_burst.needs_tick() => {
+                apply_paste_flush(&mut textarea, paste_burst.flush_if_due(Instant::now()));
             }
             maybe_line = msg_rx.recv() => {
                 match maybe_line {
@@ -1177,6 +1347,56 @@ mod tests {
         assert!(line.contains("Agents"));
         assert!(line.contains("Alice"));
         assert!(line.contains("provider timeout"));
+    }
+
+    #[test]
+    fn paste_burst_single_char_flushes_as_typed() {
+        let mut burst = PasteBurst::default();
+        let now = Instant::now();
+        burst.on_plain_char('a', now);
+
+        assert_eq!(burst.flush_if_due(now), PasteFlushResult::None);
+        assert_eq!(
+            burst.flush_if_due(now + PASTE_BURST_CHAR_INTERVAL + Duration::from_millis(1)),
+            PasteFlushResult::Typed('a')
+        );
+    }
+
+    #[test]
+    fn paste_burst_rapid_chars_flush_as_paste() {
+        let mut burst = PasteBurst::default();
+        let now = Instant::now();
+        burst.on_plain_char('a', now);
+        burst.on_plain_char('b', now + Duration::from_millis(1));
+        burst.on_plain_char('c', now + Duration::from_millis(2));
+
+        assert_eq!(
+            burst.flush_if_due(now + Duration::from_millis(3)),
+            PasteFlushResult::None
+        );
+        assert_eq!(
+            burst.flush_if_due(now + PASTE_BURST_ACTIVE_IDLE_TIMEOUT + Duration::from_millis(5)),
+            PasteFlushResult::Paste("abc".to_string())
+        );
+    }
+
+    #[test]
+    fn paste_burst_enter_window_is_temporarily_enabled_after_paste() {
+        let mut burst = PasteBurst::default();
+        let now = Instant::now();
+        burst.on_plain_char('a', now);
+        burst.on_plain_char('b', now + Duration::from_millis(1));
+        burst.on_plain_char('c', now + Duration::from_millis(2));
+        let flush_at = now + PASTE_BURST_ACTIVE_IDLE_TIMEOUT + Duration::from_millis(5);
+        assert!(matches!(
+            burst.flush_if_due(flush_at),
+            PasteFlushResult::Paste(_)
+        ));
+
+        assert!(burst.should_treat_enter_as_newline(flush_at));
+        assert!(!burst.should_treat_enter_as_newline(
+            flush_at + PASTE_ENTER_SUPPRESS_WINDOW + Duration::from_millis(1)
+        ));
     }
 
     #[test]
