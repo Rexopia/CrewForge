@@ -5,6 +5,7 @@ pub const HUB_GET_TOOL: &str = "crewforge_hub_get_unread";
 pub const HUB_ACK_TOOL: &str = "crewforge_hub_ack";
 pub const HUB_POST_TOOL: &str = "crewforge_hub_post";
 const MCP_TIMEOUT_MS: u64 = 5000;
+const DEFAULT_AGENT_STEPS: u64 = 8;
 const READONLY_BASH_PATTERNS: &[&str] = &[
     "ls",
     "ls *",
@@ -76,6 +77,7 @@ pub fn build_managed_permission(allow_edit: bool) -> Value {
         "bash": bash,
         "webfetch": "allow",
         "websearch": "allow",
+        "doom_loop": "deny",
         "question": "deny",
         "plan_enter": "deny",
         "plan_exit": "deny",
@@ -109,6 +111,7 @@ pub fn build_managed_opencode_config(
         runtime_agent_name: {
           "description": "CrewForge managed room participant agent",
           "prompt": build_managed_agent_prompt(agent_name, members, preference),
+          "steps": DEFAULT_AGENT_STEPS,
           "permission": build_managed_permission(allow_edit)
         }
       }
@@ -167,6 +170,43 @@ pub fn upsert_runtime_agent_permission(
     true
 }
 
+pub fn upsert_runtime_agent_steps(config: &mut Value, runtime_agent_name: &str) -> bool {
+    let Some(runtime_agent_obj) = config
+        .get_mut("agent")
+        .and_then(|value| value.as_object_mut())
+        .and_then(|agent| agent.get_mut(runtime_agent_name))
+        .and_then(|value| value.as_object_mut())
+    else {
+        return false;
+    };
+
+    runtime_agent_obj.insert("steps".to_string(), json!(DEFAULT_AGENT_STEPS));
+    true
+}
+
+pub fn upsert_runtime_agent_prompt(
+    config: &mut Value,
+    runtime_agent_name: &str,
+    agent_name: &str,
+    members: &str,
+    preference: Option<&str>,
+) -> bool {
+    let Some(runtime_agent_obj) = config
+        .get_mut("agent")
+        .and_then(|value| value.as_object_mut())
+        .and_then(|agent| agent.get_mut(runtime_agent_name))
+        .and_then(|value| value.as_object_mut())
+    else {
+        return false;
+    };
+
+    runtime_agent_obj.insert(
+        "prompt".to_string(),
+        json!(build_managed_agent_prompt(agent_name, members, preference)),
+    );
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,6 +223,7 @@ mod tests {
             assert_eq!(bash.get(*pattern), Some(&json!("allow")));
         }
         assert!(permission.get("edit").is_none());
+        assert_eq!(permission.get("doom_loop"), Some(&json!("deny")));
     }
 
     #[test]
@@ -203,5 +244,83 @@ mod tests {
                 "pattern should stay single-command only: {pattern}"
             );
         }
+    }
+
+    #[test]
+    fn upsert_runtime_agent_prompt_refreshes_members_and_preference() {
+        let mut config = build_managed_opencode_config(
+            "brainstorm-room",
+            "Gemini",
+            "Rex, Gemini, Claude",
+            "http://127.0.0.1:1/mcp?token=old",
+            false,
+            None,
+        );
+
+        let updated = upsert_runtime_agent_prompt(
+            &mut config,
+            "brainstorm-room",
+            "Gemini",
+            "Rex, Gemini, Kimi",
+            Some("Prefer concise replies"),
+        );
+        assert!(updated);
+
+        let prompt = config
+            .get("agent")
+            .and_then(|value| value.get("brainstorm-room"))
+            .and_then(|value| value.get("prompt"))
+            .and_then(|value| value.as_str())
+            .expect("prompt");
+        assert!(prompt.contains("Members: Rex, Gemini, Kimi"));
+        assert!(prompt.contains("Preference:\nPrefer concise replies"));
+        assert!(!prompt.contains("Members: Rex, Gemini, Claude"));
+    }
+
+    #[test]
+    fn managed_config_includes_default_steps() {
+        let config = build_managed_opencode_config(
+            "brainstorm-room",
+            "Gemini",
+            "Rex, Gemini",
+            "http://127.0.0.1:1/mcp?token=old",
+            false,
+            None,
+        );
+        assert_eq!(
+            config
+                .get("agent")
+                .and_then(|value| value.get("brainstorm-room"))
+                .and_then(|value| value.get("steps")),
+            Some(&json!(8))
+        );
+    }
+
+    #[test]
+    fn upsert_runtime_agent_steps_sets_default_steps() {
+        let mut config = build_managed_opencode_config(
+            "brainstorm-room",
+            "Gemini",
+            "Rex, Gemini",
+            "http://127.0.0.1:1/mcp?token=old",
+            false,
+            None,
+        );
+        config
+            .get_mut("agent")
+            .and_then(|value| value.get_mut("brainstorm-room"))
+            .and_then(|value| value.as_object_mut())
+            .expect("agent object")
+            .remove("steps");
+
+        let updated = upsert_runtime_agent_steps(&mut config, "brainstorm-room");
+        assert!(updated);
+        assert_eq!(
+            config
+                .get("agent")
+                .and_then(|value| value.get("brainstorm-room"))
+                .and_then(|value| value.get("steps")),
+            Some(&json!(8))
+        );
     }
 }

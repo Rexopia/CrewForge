@@ -231,6 +231,45 @@ impl ChatRuntime {
         })
     }
 
+    pub(crate) async fn cancel_active_agent_calls(&self) -> usize {
+        let mut tasks = {
+            let mut guard = self.active_wake_tasks.lock().await;
+            std::mem::take(&mut *guard)
+        };
+        let canceled = tasks.iter().filter(|task| !task.is_finished()).count();
+
+        for task in &tasks {
+            task.abort();
+        }
+        for task in tasks.drain(..) {
+            let _ = task.await;
+        }
+
+        let mut running_agent_ids = Vec::new();
+        {
+            let mut states = self.worker_state_by_agent_id.lock().await;
+            for agent in self.runtime_agents.iter() {
+                if let Some(state) = states.get_mut(&agent.id) {
+                    if state.running {
+                        running_agent_ids.push(agent.id.clone());
+                    }
+                    state.running = false;
+                    state.dirty = false;
+                }
+            }
+        }
+
+        for agent_id in running_agent_ids {
+            self.emit_agent_status(&agent_id, "idle", None);
+        }
+        for agent in self.runtime_agents.iter() {
+            let _ = self.room_hub.finish_wake(&agent.id).await;
+        }
+        let _ = self.sync_new_events_from_kernel().await;
+
+        canceled
+    }
+
     async fn mark_agents_dirty(&self, exclude_agent_id: Option<&str>) {
         let mut states = self.worker_state_by_agent_id.lock().await;
         for agent in self.runtime_agents.iter() {
@@ -385,13 +424,35 @@ impl ChatRuntime {
             return Ok(());
         }
 
+        self.room_hub.begin_wake(&agent_id).await?;
         self.emit_agent_status(&agent_id, "active", None);
         let mut had_error = false;
-        if let Err(error) = self.ask_agent_event_turn(&agent_id).await {
+        let ask_error = self.ask_agent_event_turn(&agent_id).await.err();
+        let finish_error = self.room_hub.finish_wake(&agent_id).await.err();
+
+        if let Some(error) = ask_error {
             had_error = true;
             let error_line = to_single_line_error(&error.to_string());
-            let speaker = self
-                .runtime_agent_name(&agent_id);
+            let speaker = self.runtime_agent_name(&agent_id);
+            self.emit_agent_status(&agent_id, "error", Some(&error_line));
+            let _ = self
+                .add_message(
+                    MessageRole::Agent,
+                    speaker,
+                    format!("[provider error] {error_line}"),
+                    Some(agent_id.clone()),
+                )
+                .await;
+            if let Some(extra) = finish_error {
+                self.print_system_line(&format!(
+                    "[wake budget cleanup error] {}",
+                    to_single_line_error(&extra.to_string())
+                ));
+            }
+        } else if let Some(error) = finish_error {
+            had_error = true;
+            let error_line = to_single_line_error(&error.to_string());
+            let speaker = self.runtime_agent_name(&agent_id);
             self.emit_agent_status(&agent_id, "error", Some(&error_line));
             let _ = self
                 .add_message(
@@ -561,11 +622,13 @@ pub async fn run_chat(args: ChatArgs) -> Result<()> {
 
     let mut providers_by_agent_id = HashMap::new();
     for agent in &runtime_agents {
+        let runtime_agent_name =
+            runtime_agent_name_for_member(&room.opencode.runtime_agent_name, &agent.id);
         let provider = OpencodeCliProvider::new(
             OpencodeProviderConfig {
                 command: room.opencode.command.clone(),
                 timeout_ms: room.opencode.timeout_ms,
-                runtime_agent_name: room.opencode.runtime_agent_name.clone(),
+                runtime_agent_name,
                 workspace_dir: room.workspace_dir.clone(),
             },
             agent.model.clone(),
@@ -1268,8 +1331,10 @@ async fn ensure_room_agent_configs(cwd: &Path, room: &RoomConfig) -> Result<()> 
             continue;
         }
 
+        let runtime_agent_name =
+            runtime_agent_name_for_member(&room.opencode.runtime_agent_name, &agent.id);
         let config = managed_opencode::build_managed_opencode_config(
-            &room.opencode.runtime_agent_name,
+            &runtime_agent_name,
             &agent.name,
             &members,
             INIT_PLACEHOLDER_MCP_URL,
@@ -1418,7 +1483,7 @@ fn spawn_watchdog(
 }
 
 fn help_text() -> &'static str {
-    "Commands:\n  /help    Show help\n  /agents  List members\n  /exit    Quit chat\n  /quit    Quit chat (alias)\n\nInput:\n  Enter            Send message\n  Ctrl+J           Insert newline\n  Ctrl+C           Clear current input\n  Ctrl+D           Exit chat\n\nNavigation:\n  PageUp/PageDown  Scroll chat (3 lines)\n  Ctrl+P/N         Scroll chat (3 lines)\n  Home/End         Jump to top/bottom\n  Alt+Up/Down      Scroll chat (1 line)\n  Ctrl+Up/Down     Scroll chat (1 line)\n\nSession:\n  Resume: crewforge chat --resume <session-id|path>"
+    "Commands:\n  /help    Show help\n  /agents  List members\n  /exit    Quit chat\n  /quit    Quit chat (alias)\n\nInput:\n  Enter            Send message\n  Ctrl+J           Insert newline\n  Ctrl+C           Clear current input\n  Ctrl+D           Exit chat\n  Esc              Cancel active agent calls\n\nNavigation:\n  PageUp/PageDown  Scroll chat (3 lines)\n  Ctrl+P/N         Scroll chat (3 lines)\n  Home/End         Jump to top/bottom\n  Alt+Up/Down      Scroll chat (1 line)\n  Ctrl+Up/Down     Scroll chat (1 line)\n\nSession:\n  Resume: crewforge chat --resume <session-id|path>"
 }
 
 fn build_event_turn_prompt(
@@ -1538,11 +1603,26 @@ async fn write_runtime_opencode_configs(
     for agent in runtime_agents {
         let mcp_url = mcp_server.get_mcp_url_for_agent(&agent.id)?;
         let config_path = agent.runtime_dir.join("opencode.json");
+        let runtime_agent_name =
+            runtime_agent_name_for_member(&room.opencode.runtime_agent_name, &agent.id);
+        let agent_name = if agent.name.trim().is_empty() {
+            "Agent"
+        } else {
+            agent.name.as_str()
+        };
+        let preference = room
+            .agents
+            .iter()
+            .find(|item| item.id == agent.id)
+            .and_then(|item| item.preference.as_deref());
         let updated = update_runtime_opencode_mcp_url(
             &config_path,
             &mcp_url,
-            &room.opencode.runtime_agent_name,
+            &runtime_agent_name,
+            agent_name,
+            &members,
             false,
+            preference,
         )
         .await?;
 
@@ -1566,7 +1646,10 @@ async fn update_runtime_opencode_mcp_url(
     config_path: &Path,
     mcp_url: &str,
     runtime_agent_name: &str,
+    agent_name: &str,
+    members: &str,
     allow_edit: bool,
+    preference: Option<&str>,
 ) -> Result<bool> {
     let raw = match tokio::fs::read_to_string(config_path).await {
         Ok(text) => text,
@@ -1597,6 +1680,18 @@ async fn update_runtime_opencode_mcp_url(
         &mut config,
         runtime_agent_name,
         allow_edit,
+    ) {
+        return Ok(false);
+    }
+    if !managed_opencode::upsert_runtime_agent_steps(&mut config, runtime_agent_name) {
+        return Ok(false);
+    }
+    if !managed_opencode::upsert_runtime_agent_prompt(
+        &mut config,
+        runtime_agent_name,
+        agent_name,
+        members,
+        preference,
     ) {
         return Ok(false);
     }
@@ -1652,14 +1747,48 @@ fn build_runtime_opencode_config_fallback(
         .find(|item| item.id == agent.id)
         .and_then(|item| item.preference.as_deref());
 
+    let runtime_agent_name =
+        runtime_agent_name_for_member(&room.opencode.runtime_agent_name, &agent.id);
+
     managed_opencode::build_managed_opencode_config(
-        &room.opencode.runtime_agent_name,
+        &runtime_agent_name,
         agent_name,
         members,
         mcp_url,
         false,
         preference,
     )
+}
+
+fn runtime_agent_name_for_member(base_runtime_agent_name: &str, agent_id: &str) -> String {
+    let base = {
+        let trimmed = base_runtime_agent_name.trim();
+        if trimmed.is_empty() {
+            "brainstorm-room"
+        } else {
+            trimmed
+        }
+    };
+
+    let suffix = agent_id
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+
+    if suffix.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}--{suffix}")
+    }
 }
 
 #[cfg(test)]
@@ -1676,6 +1805,7 @@ mod tests {
         assert!(help_text().contains("Ctrl+J"));
         assert!(help_text().contains("Ctrl+C"));
         assert!(help_text().contains("Ctrl+D"));
+        assert!(help_text().contains("Esc"));
     }
 
     #[test]
@@ -1816,14 +1946,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_runtime_opencode_config_refreshes_managed_permission() {
+    async fn update_runtime_opencode_config_refreshes_managed_fields() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let config_path = tmp.path().join("opencode.json");
 
         let mut config = managed_opencode::build_managed_opencode_config(
             "brainstorm-room",
             "Codex",
-            "Rex, Codex",
+            "Rex, Codex, Claude",
             "http://127.0.0.1:1/mcp?token=old",
             false,
             None,
@@ -1850,7 +1980,10 @@ mod tests {
             &config_path,
             "http://127.0.0.1:2/mcp?token=new",
             "brainstorm-room",
+            "Codex",
+            "Rex, Codex, Gemini",
             false,
+            Some("Prefer concise replies"),
         )
         .await
         .expect("update runtime config");
@@ -1866,6 +1999,23 @@ mod tests {
             .expect("permission object");
         assert!(permission_obj.get("bash").is_some());
         assert!(permission_obj.get("edit").is_none());
+
+        let prompt = parsed
+            .get("agent")
+            .and_then(|value| value.get("brainstorm-room"))
+            .and_then(|value| value.get("prompt"))
+            .and_then(|value| value.as_str())
+            .expect("prompt string");
+        assert!(prompt.contains("Members: Rex, Codex, Gemini"));
+        assert!(prompt.contains("Preference:\nPrefer concise replies"));
+        assert!(!prompt.contains("Members: Rex, Codex, Claude"));
+        assert_eq!(
+            parsed
+                .get("agent")
+                .and_then(|value| value.get("brainstorm-room"))
+                .and_then(|value| value.get("steps")),
+            Some(&json!(8))
+        );
     }
 
     #[test]
@@ -1893,6 +2043,18 @@ mod tests {
         assert_eq!(
             build_resume_hint_command(&args, "session-2026-02-21T13-53-50-911Z"),
             "crewforge chat --config custom/room.json --resume session-2026-02-21T13-53-50-911Z"
+        );
+    }
+
+    #[test]
+    fn runtime_agent_name_for_member_scopes_and_sanitizes() {
+        assert_eq!(
+            runtime_agent_name_for_member("brainstorm-room", "Code X"),
+            "brainstorm-room--code-x"
+        );
+        assert_eq!(
+            runtime_agent_name_for_member("brainstorm-room", "data_scientist"),
+            "brainstorm-room--data_scientist"
         );
     }
 }

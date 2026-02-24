@@ -30,7 +30,7 @@ use tokio::sync::oneshot;
 use tokio::time::{Duration, sleep};
 use tower::ServiceExt;
 
-use crate::hub::RoomHub;
+use crate::hub::{HUB_TOOL_ACK, HUB_TOOL_GET_UNREAD, HUB_TOOL_POST, RoomHub};
 use crate::kernel::MessageRole;
 
 #[derive(Clone)]
@@ -81,7 +81,11 @@ impl ServerHandler for HubToolServer {
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> std::result::Result<CallToolResult, McpError> {
         match request.name.as_ref() {
-            "hub_get_unread" => {
+            HUB_TOOL_GET_UNREAD => {
+                self.room_hub
+                    .register_wake_tool_call(&self.agent_id, HUB_TOOL_GET_UNREAD)
+                    .await
+                    .map_err(internal_error)?;
                 let unread_result = self
                     .room_hub
                     .get_unread(&self.agent_id)
@@ -120,7 +124,11 @@ impl ServerHandler for HubToolServer {
                     meta: None,
                 })
             }
-            "hub_ack" => {
+            HUB_TOOL_ACK => {
+                self.room_hub
+                    .register_wake_tool_call(&self.agent_id, HUB_TOOL_ACK)
+                    .await
+                    .map_err(internal_error)?;
                 let arguments = request.arguments.ok_or_else(|| {
                     McpError::invalid_params("missing arguments for hub_ack", None)
                 })?;
@@ -142,7 +150,11 @@ impl ServerHandler for HubToolServer {
                     meta: None,
                 })
             }
-            "hub_post" => {
+            HUB_TOOL_POST => {
+                self.room_hub
+                    .register_wake_tool_call(&self.agent_id, HUB_TOOL_POST)
+                    .await
+                    .map_err(internal_error)?;
                 let arguments = request.arguments.ok_or_else(|| {
                     McpError::invalid_params("missing arguments for hub_post", None)
                 })?;
@@ -365,7 +377,7 @@ fn hub_get_tool() -> Tool {
     .expect("hub_get schema should deserialize");
 
     Tool::new(
-        Cow::Borrowed("hub_get_unread"),
+        Cow::Borrowed(HUB_TOOL_GET_UNREAD),
         Cow::Borrowed("Get unread room events for the connected agent."),
         Arc::new(schema),
     )
@@ -383,7 +395,7 @@ fn hub_ack_tool() -> Tool {
     .expect("hub_ack schema should deserialize");
 
     Tool::new(
-        Cow::Borrowed("hub_ack"),
+        Cow::Borrowed(HUB_TOOL_ACK),
         Cow::Borrowed("Advance read cursor for the connected agent."),
         Arc::new(schema),
     )
@@ -402,7 +414,7 @@ fn hub_post_tool() -> Tool {
     .expect("hub_post schema should deserialize");
 
     Tool::new(
-        Cow::Borrowed("hub_post"),
+        Cow::Borrowed(HUB_TOOL_POST),
         Cow::Borrowed("Post one room message as the connected agent."),
         Arc::new(schema),
     )

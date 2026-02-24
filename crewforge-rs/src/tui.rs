@@ -277,7 +277,15 @@ fn normalize_newlines(text: &str) -> String {
 fn initial_agent_statuses(agent_names: &[String]) -> BTreeMap<String, AgentStatusEntry> {
     agent_names
         .iter()
-        .map(|name| (name.clone(), AgentStatusEntry::default()))
+        .map(|name| {
+            (
+                name.clone(),
+                AgentStatusEntry {
+                    state: AgentStatusState::Idle,
+                    reason: None,
+                },
+            )
+        })
         .collect()
 }
 
@@ -324,10 +332,24 @@ fn agent_status_symbol(state: AgentStatusState) -> &'static str {
 }
 
 fn build_status_line(statuses: &BTreeMap<String, AgentStatusEntry>) -> Line<'static> {
-    let mut spans = vec![Span::styled(
-        "Agents ",
-        Style::default().add_modifier(Modifier::BOLD),
-    )];
+    let has_running = statuses
+        .values()
+        .any(|entry| matches!(entry.state, AgentStatusState::Active));
+    let overall_label = if has_running { "running" } else { "idle" };
+    let overall_style = if has_running {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM)
+    };
+
+    let mut spans = vec![
+        Span::styled("Status ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{overall_label:<7}"), overall_style),
+        Span::raw(" | "),
+        Span::styled("Agents ", Style::default().add_modifier(Modifier::BOLD)),
+    ];
     if statuses.is_empty() {
         spans.push(Span::styled(
             "none",
@@ -640,6 +662,29 @@ pub async fn run_tui_loop(
                         if is_clear_input_key(&key) {
                             paste_burst = PasteBurst::default();
                             textarea = build_textarea(&prompt);
+                            continue;
+                        }
+
+                        if is_cancel_agents_key(&key) {
+                            apply_paste_flush(
+                                &mut textarea,
+                                paste_burst.flush_before_non_char(),
+                            );
+                            paste_burst.clear_window_after_non_char();
+
+                            let canceled = runtime.cancel_active_agent_calls().await;
+                            let notice = if canceled == 0 {
+                                "[interrupt] no active agent calls.".to_string()
+                            } else {
+                                format!("[interrupt] canceled {canceled} active agent call(s).")
+                            };
+                            handle_display_line(
+                                DisplayLine::System(notice),
+                                &mut display_lines,
+                                &mut rendered_line_cache,
+                                &mut agent_statuses,
+                            );
+                            auto_scroll = true;
                             continue;
                         }
 
@@ -1175,6 +1220,10 @@ fn is_clear_input_key(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c' | 'C'))
 }
 
+fn is_cancel_agents_key(key: &KeyEvent) -> bool {
+    key.modifiers.is_empty() && key.code == KeyCode::Esc
+}
+
 fn is_scroll_up(key: &KeyEvent) -> bool {
     is_page_up_alias(key)
         || (key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Up)
@@ -1226,11 +1275,7 @@ mod tests {
         key_event_with_kind(code, modifiers, KeyEventKind::Press)
     }
 
-    fn key_event_with_kind(
-        code: KeyCode,
-        modifiers: KeyModifiers,
-        kind: KeyEventKind,
-    ) -> KeyEvent {
+    fn key_event_with_kind(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) -> KeyEvent {
         KeyEvent {
             code,
             modifiers,
@@ -1295,8 +1340,11 @@ mod tests {
         );
         let repeat_page_up =
             key_event_with_kind(KeyCode::PageUp, KeyModifiers::empty(), KeyEventKind::Repeat);
-        let repeat_plain_char =
-            key_event_with_kind(KeyCode::Char('a'), KeyModifiers::empty(), KeyEventKind::Repeat);
+        let repeat_plain_char = key_event_with_kind(
+            KeyCode::Char('a'),
+            KeyModifiers::empty(),
+            KeyEventKind::Repeat,
+        );
 
         assert!(!should_handle_key_event(&repeat_enter));
         assert!(!should_handle_key_event(&repeat_ctrl_j));
@@ -1313,6 +1361,10 @@ mod tests {
         let ctrl_d = key_event(KeyCode::Char('d'), KeyModifiers::CONTROL);
         assert!(!is_clear_input_key(&ctrl_d));
         assert!(is_exit_key(&ctrl_d));
+
+        let esc = key_event(KeyCode::Esc, KeyModifiers::empty());
+        assert!(is_cancel_agents_key(&esc));
+        assert!(!is_exit_key(&esc));
     }
 
     #[test]
@@ -1380,6 +1432,43 @@ mod tests {
         assert!(line.contains("Agents"));
         assert!(line.contains("Alice"));
         assert!(line.contains("provider timeout"));
+    }
+
+    #[test]
+    fn status_line_shows_running_when_any_agent_is_active() {
+        let mut statuses = BTreeMap::new();
+        statuses.insert(
+            "Gemini".to_string(),
+            AgentStatusEntry {
+                state: AgentStatusState::Active,
+                reason: None,
+            },
+        );
+        statuses.insert(
+            "Kimi".to_string(),
+            AgentStatusEntry {
+                state: AgentStatusState::Idle,
+                reason: None,
+            },
+        );
+
+        let line = build_status_line(&statuses).to_string();
+        assert!(line.contains("Status running |"));
+    }
+
+    #[test]
+    fn status_line_pads_idle_to_align_separator() {
+        let mut statuses = BTreeMap::new();
+        statuses.insert(
+            "Gemini".to_string(),
+            AgentStatusEntry {
+                state: AgentStatusState::Idle,
+                reason: None,
+            },
+        );
+
+        let line = build_status_line(&statuses).to_string();
+        assert!(line.contains("Status idle    |"));
     }
 
     #[test]
