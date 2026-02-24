@@ -408,6 +408,16 @@ fn key_plain_char(key: &KeyEvent) -> Option<char> {
     }
 }
 
+fn should_handle_key_event(key: &KeyEvent) -> bool {
+    match key.kind {
+        KeyEventKind::Press => true,
+        // Only allow key repeat for plain text input. Repeating Enter / Ctrl+J / nav keys
+        // can accidentally inject extra newlines or scroll steps on some terminals.
+        KeyEventKind::Repeat => key_plain_char(key).is_some(),
+        _ => false,
+    }
+}
+
 struct TerminalGuard;
 
 impl Drop for TerminalGuard {
@@ -615,7 +625,7 @@ pub async fn run_tui_loop(
             maybe_event = event_stream.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) => {
-                        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                        if !should_handle_key_event(&key) {
                             continue;
                         }
 
@@ -1213,10 +1223,18 @@ mod tests {
     use crossterm::event::KeyEventState;
 
     fn key_event(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        key_event_with_kind(code, modifiers, KeyEventKind::Press)
+    }
+
+    fn key_event_with_kind(
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        kind: KeyEventKind,
+    ) -> KeyEvent {
         KeyEvent {
             code,
             modifiers,
-            kind: KeyEventKind::Press,
+            kind,
             state: KeyEventState::empty(),
         }
     }
@@ -1264,6 +1282,26 @@ mod tests {
         let ctrl_j = key_event(KeyCode::Char('j'), KeyModifiers::CONTROL);
         assert!(!is_submit_key(&ctrl_j));
         assert!(is_newline_key(&ctrl_j));
+    }
+
+    #[test]
+    fn key_repeat_is_ignored_for_non_plain_keys() {
+        let repeat_enter =
+            key_event_with_kind(KeyCode::Enter, KeyModifiers::empty(), KeyEventKind::Repeat);
+        let repeat_ctrl_j = key_event_with_kind(
+            KeyCode::Char('j'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Repeat,
+        );
+        let repeat_page_up =
+            key_event_with_kind(KeyCode::PageUp, KeyModifiers::empty(), KeyEventKind::Repeat);
+        let repeat_plain_char =
+            key_event_with_kind(KeyCode::Char('a'), KeyModifiers::empty(), KeyEventKind::Repeat);
+
+        assert!(!should_handle_key_event(&repeat_enter));
+        assert!(!should_handle_key_event(&repeat_ctrl_j));
+        assert!(!should_handle_key_event(&repeat_page_up));
+        assert!(should_handle_key_event(&repeat_plain_char));
     }
 
     #[test]
