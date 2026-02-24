@@ -170,10 +170,10 @@ pub fn parse_stream_json(raw_text: &str) -> ParsedStreamJson {
         };
 
         parsed_lines += 1;
-        if session_id.is_empty() {
-            if let Some(id) = event.session_id {
-                session_id = id;
-            }
+        if session_id.is_empty()
+            && let Some(id) = event.session_id
+        {
+            session_id = id;
         }
 
         if let Some(text) = event.text {

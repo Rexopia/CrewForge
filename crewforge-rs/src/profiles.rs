@@ -17,10 +17,10 @@ struct ProfilesFile {
 }
 
 pub fn global_profiles_path() -> Result<PathBuf> {
-    if let Some(raw_path) = std::env::var_os("CREWFORGE_PROFILES_PATH") {
-        if !raw_path.is_empty() {
-            return Ok(PathBuf::from(raw_path));
-        }
+    if let Some(raw_path) = std::env::var_os("CREWFORGE_PROFILES_PATH")
+        && !raw_path.is_empty()
+    {
+        return Ok(PathBuf::from(raw_path));
     }
 
     let home = std::env::var_os("HOME").ok_or_else(|| {

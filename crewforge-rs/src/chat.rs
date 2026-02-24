@@ -727,7 +727,6 @@ async fn run_plain_stdin_loop(runtime: Arc<ChatRuntime>, stop_flag: Arc<AtomicBo
 enum RpcCommand {
     Input(String),
     SlashCommand(String),
-    Resize { width: u16, height: u16 },
     Exit,
     Ping,
 }
@@ -826,9 +825,6 @@ async fn run_jsonl_rpc_loop(
                             break;
                         }
                     }
-                    RpcCommand::Resize { width, height } => {
-                        let _ = (width, height);
-                    }
                     RpcCommand::Exit => {
                         stop_flag.store(true, Ordering::SeqCst);
                         break;
@@ -877,21 +873,7 @@ fn parse_rpc_command(raw: &str) -> Result<RpcCommand> {
                 .ok_or_else(|| anyhow!("rpc slash_command requires string field: command"))?;
             Ok(RpcCommand::SlashCommand(command.to_string()))
         }
-        "resize" => {
-            let width = value
-                .get("width")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| anyhow!("rpc resize command requires number field: width"))?;
-            let height = value
-                .get("height")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| anyhow!("rpc resize command requires number field: height"))?;
-            let width =
-                u16::try_from(width).map_err(|_| anyhow!("rpc resize width out of range"))?;
-            let height =
-                u16::try_from(height).map_err(|_| anyhow!("rpc resize height out of range"))?;
-            Ok(RpcCommand::Resize { width, height })
-        }
+        "resize" => bail!("rpc resize command is no longer supported"),
         "exit" => Ok(RpcCommand::Exit),
         "ping" => Ok(RpcCommand::Ping),
         other => bail!("unsupported rpc command type: {other}"),
@@ -1189,10 +1171,9 @@ fn profile_to_room_agent_json(profile: &GlobalProfile) -> Value {
 
     if let Some(preference) = &profile.preference
         && !preference.trim().is_empty()
+        && let Some(obj) = value.as_object_mut()
     {
-        if let Some(obj) = value.as_object_mut() {
-            obj.insert("preference".to_string(), json!(preference.trim()));
-        }
+        obj.insert("preference".to_string(), json!(preference.trim()));
     }
 
     value
@@ -1764,16 +1745,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_rpc_resize_command() {
-        let command = parse_rpc_command(r#"{"type":"resize","width":120,"height":40}"#)
-            .expect("parse resize command");
-        assert_eq!(
-            command,
-            RpcCommand::Resize {
-                width: 120,
-                height: 40
-            }
-        );
+    fn parse_rpc_resize_command_is_rejected() {
+        let error = parse_rpc_command(r#"{"type":"resize","width":120,"height":40}"#)
+            .expect_err("resize command should fail");
+        assert!(error.to_string().contains("no longer supported"));
     }
 
     #[test]

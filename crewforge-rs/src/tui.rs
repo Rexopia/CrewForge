@@ -56,8 +56,9 @@ const PASTE_BURST_ACTIVE_IDLE_TIMEOUT: Duration = Duration::from_millis(8);
 #[cfg(windows)]
 const PASTE_BURST_ACTIVE_IDLE_TIMEOUT: Duration = Duration::from_millis(60);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum AgentStatusState {
+    #[default]
     Unknown,
     Idle,
     Active,
@@ -68,12 +69,6 @@ enum AgentStatusState {
 struct AgentStatusEntry {
     state: AgentStatusState,
     reason: Option<String>,
-}
-
-impl Default for AgentStatusState {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 #[derive(Debug, Default)]
@@ -1097,10 +1092,10 @@ fn load_session_events_range_blocking(
     let mut line = String::new();
     let mut events = Vec::with_capacity(end.saturating_sub(start));
 
-    for index in start..end {
+    for (index, line_offset) in line_offsets.iter().enumerate().take(end).skip(start) {
         line.clear();
         reader
-            .seek(SeekFrom::Start(line_offsets[index]))
+            .seek(SeekFrom::Start(*line_offset))
             .with_context(|| {
                 format!(
                     "failed seeking session file at line index {} in {}",

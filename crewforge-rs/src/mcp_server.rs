@@ -343,15 +343,15 @@ fn internal_error(error: anyhow::Error) -> McpError {
 
 fn as_positive_u64(value: Option<&serde_json::Value>) -> Option<u64> {
     let val = value?;
-    if let Some(v) = val.as_u64() {
-        if v > 0 {
-            return Some(v);
-        }
+    if let Some(v) = val.as_u64()
+        && v > 0
+    {
+        return Some(v);
     }
-    if let Some(v) = val.as_i64() {
-        if v > 0 {
-            return Some(v as u64);
-        }
+    if let Some(v) = val.as_i64()
+        && v > 0
+    {
+        return Some(v as u64);
     }
     None
 }
