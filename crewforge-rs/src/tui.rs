@@ -258,7 +258,7 @@ fn prefixed_message_lines(prefix: String, prefix_style: Style, text: &str) -> Ve
         Span::raw(format!(": {first}")),
     ]));
     for line in iter {
-        lines.push(Line::from(vec![Span::raw("  "), Span::raw(line)]));
+        lines.push(Line::from(Span::raw(line)));
     }
     lines
 }
@@ -1380,6 +1380,22 @@ mod tests {
     fn rendered_line_count_respects_explicit_newlines() {
         let lines = vec![DisplayLine::System("alpha\nbeta".to_string())];
         assert_eq!(rendered_line_count(&lines, 80), 2);
+    }
+
+    #[test]
+    fn agent_multiline_render_keeps_single_blank_line_without_indent_padding() {
+        let lines = DisplayLine::Agent {
+            ts: "00:00:00".to_string(),
+            speaker: "Gemini".to_string(),
+            text: "alpha\n\nbeta".to_string(),
+            agent_idx: 0,
+        }
+        .to_styled_lines();
+
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].to_string().ends_with(": alpha"));
+        assert_eq!(lines[1].to_string(), "");
+        assert_eq!(lines[2].to_string(), "beta");
     }
 
     #[test]
