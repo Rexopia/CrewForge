@@ -31,6 +31,7 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tui_textarea::TextArea;
+use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
 use crate::chat::{ChatRuntime, handle_user_input};
@@ -40,9 +41,11 @@ const INPUT_MIN_ROWS: u16 = 1;
 const INPUT_MAX_ROWS: u16 = 5;
 const INPUT_CHROME_ROWS: u16 = 2;
 const STATUS_BAR_ROWS: u16 = 1;
-const KEY_SCROLL_STEP: u16 = 3;
+const PAGE_SCROLL_KEEP_CONTEXT_ROWS: u16 = 2;
+const PREFETCH_TOP_TRIGGER_MIN_ROWS: u16 = 4;
 const HISTORY_PAGE_MESSAGES: usize = 200;
 const TUI_TICK_INTERVAL: Duration = Duration::from_millis(16);
+const SCROLL_ACCEL_WINDOW: Duration = Duration::from_millis(280);
 const PASTE_BURST_MIN_CHARS: u16 = 3;
 const PASTE_ENTER_SUPPRESS_WINDOW: Duration = Duration::from_millis(120);
 
@@ -86,6 +89,42 @@ enum PasteFlushResult {
     None,
     Typed(char),
     Paste(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrollDirection {
+    Up,
+    Down,
+}
+
+#[derive(Debug, Default)]
+struct ScrollMomentum {
+    direction: Option<ScrollDirection>,
+    last_at: Option<Instant>,
+    streak: u8,
+}
+
+impl ScrollMomentum {
+    fn next_step(&mut self, direction: ScrollDirection, base_step: u16, now: Instant) -> u16 {
+        let is_continuation = self.direction == Some(direction)
+            && self
+                .last_at
+                .is_some_and(|last| now.duration_since(last) <= SCROLL_ACCEL_WINDOW);
+        if is_continuation {
+            self.streak = self.streak.saturating_add(1);
+        } else {
+            self.direction = Some(direction);
+            self.streak = 1;
+        }
+        self.last_at = Some(now);
+        accelerated_scroll_step(base_step, self.streak)
+    }
+
+    fn reset(&mut self) {
+        self.direction = None;
+        self.last_at = None;
+        self.streak = 0;
+    }
 }
 
 impl PasteBurst {
@@ -458,7 +497,7 @@ impl Drop for TerminalGuard {
 struct RenderedLineCache {
     width: u16,
     len: usize,
-    line_count: usize,
+    rows: Vec<Line<'static>>,
     valid: bool,
 }
 
@@ -467,15 +506,45 @@ impl RenderedLineCache {
         self.valid = false;
     }
 
-    fn line_count(&mut self, lines: &[DisplayLine], view_width: u16) -> usize {
+    fn ensure_rows(&mut self, lines: &[DisplayLine], view_width: u16) {
+        let view_width = view_width.max(1);
         if !self.valid || self.width != view_width || self.len != lines.len() {
-            self.line_count = rendered_line_count(lines, view_width);
+            self.rows = rendered_rows_for_lines(lines, view_width);
             self.width = view_width;
             self.len = lines.len();
             self.valid = true;
         }
-        self.line_count
     }
+
+    fn total_rows(&mut self, lines: &[DisplayLine], view_width: u16) -> usize {
+        self.ensure_rows(lines, view_width);
+        self.rows.len()
+    }
+
+    fn visible_rows(
+        &mut self,
+        lines: &[DisplayLine],
+        view_width: u16,
+        scroll_offset: u16,
+        view_height: u16,
+    ) -> Vec<Line<'static>> {
+        self.ensure_rows(lines, view_width);
+        let start = scroll_offset as usize;
+        if start >= self.rows.len() {
+            return vec![Line::default()];
+        }
+
+        let end = start
+            .saturating_add(view_height.max(1) as usize)
+            .min(self.rows.len());
+        self.rows[start..end].to_vec()
+    }
+}
+
+#[derive(Debug)]
+struct HistoryPrefetch {
+    start: usize,
+    task: JoinHandle<Result<Vec<MessageEvent>>>,
 }
 
 #[derive(Debug)]
@@ -517,6 +586,13 @@ impl SessionHistoryPager {
 
     fn has_older(&self) -> bool {
         self.loaded_start > 0
+    }
+
+    fn next_older_start(&self) -> Option<usize> {
+        if !self.has_older() {
+            return None;
+        }
+        Some(self.loaded_start.saturating_sub(HISTORY_PAGE_MESSAGES))
     }
 
     async fn load_older_page(&mut self, runtime: &ChatRuntime) -> Result<Vec<DisplayLine>> {
@@ -589,6 +665,8 @@ pub async fn run_tui_loop(
     let mut rendered_line_cache = RenderedLineCache::default();
     let mut event_stream = EventStream::new();
     let mut paste_burst = PasteBurst::default();
+    let mut scroll_momentum = ScrollMomentum::default();
+    let mut pending_prefetch: Option<HistoryPrefetch> = None;
     let mut watchdog_handle: Option<JoinHandle<()>> = None;
     let mut seen_human_message = false;
 
@@ -627,6 +705,14 @@ pub async fn run_tui_loop(
             scroll_offset = scroll_offset.min(max_scroll);
         }
 
+        maybe_start_history_prefetch(
+            &mut pending_prefetch,
+            &history_pager,
+            auto_scroll,
+            scroll_offset,
+            view_height,
+        );
+
         terminal
             .draw(|frame| {
                 render(
@@ -635,6 +721,7 @@ pub async fn run_tui_loop(
                     &agent_statuses,
                     &textarea,
                     scroll_offset,
+                    &mut rendered_line_cache,
                 );
             })
             .context("failed to draw ratatui frame")?;
@@ -660,12 +747,14 @@ pub async fn run_tui_loop(
                         }
 
                         if is_clear_input_key(&key) {
+                            scroll_momentum.reset();
                             paste_burst = PasteBurst::default();
                             textarea = build_textarea(&prompt);
                             continue;
                         }
 
                         if is_cancel_agents_key(&key) {
+                            scroll_momentum.reset();
                             apply_paste_flush(
                                 &mut textarea,
                                 paste_burst.flush_before_non_char(),
@@ -689,6 +778,7 @@ pub async fn run_tui_loop(
                         }
 
                         if let Some(ch) = key_plain_char(&key) {
+                            scroll_momentum.reset();
                             paste_burst.on_plain_char(ch, now);
                             continue;
                         }
@@ -698,11 +788,16 @@ pub async fn run_tui_loop(
 
                         if is_scroll_up(&key) {
                             auto_scroll = false;
-                            let step = scroll_step_for_key(&key);
+                            let step = scroll_momentum.next_step(
+                                ScrollDirection::Up,
+                                scroll_step_for_key(&key, view_height),
+                                now,
+                            );
                             while scroll_offset < step && history_pager.has_older() {
-                                if !prepend_older_history_page(
+                                if !prepend_next_older_page(
                                     &mut history_pager,
                                     &runtime,
+                                    &mut pending_prefetch,
                                     &mut display_lines,
                                     view_width,
                                     &mut scroll_offset,
@@ -725,12 +820,19 @@ pub async fn run_tui_loop(
                                     view_width,
                                     &mut rendered_line_cache,
                                 );
+                            let step = scroll_momentum.next_step(
+                                ScrollDirection::Down,
+                                scroll_step_for_key(&key, view_height),
+                                now,
+                            );
                             scroll_offset = scroll_offset
-                                .saturating_add(scroll_step_for_key(&key))
+                                .saturating_add(step)
                                 .min(max_scroll);
                             auto_scroll = scroll_offset >= max_scroll;
                             continue;
                         }
+
+                        scroll_momentum.reset();
 
                         if is_jump_to_top_key(&key) {
                             auto_scroll = false;
@@ -783,12 +885,14 @@ pub async fn run_tui_loop(
                         textarea.input(key);
                     }
                     Some(Ok(Event::Paste(data))) => {
+                        scroll_momentum.reset();
                         apply_paste_flush(&mut textarea, paste_burst.flush_before_non_char());
                         paste_burst.clear_window_after_non_char();
                         textarea.insert_str(normalize_newlines(&data));
                         continue;
                     }
                     Some(Ok(Event::Resize(new_width, new_height))) => {
+                        scroll_momentum.reset();
                         apply_paste_flush(&mut textarea, paste_burst.flush_before_non_char());
                         paste_burst.clear_window_after_non_char();
                         (view_height, view_width) = message_view_dimensions(
@@ -817,6 +921,29 @@ pub async fn run_tui_loop(
             }
             _ = sleep(TUI_TICK_INTERVAL), if paste_burst.needs_tick() => {
                 apply_paste_flush(&mut textarea, paste_burst.flush_if_due(Instant::now()));
+            }
+            prefetch_join = async {
+                let pending = pending_prefetch
+                    .take()
+                    .expect("prefetch branch runs only when task exists");
+                let start = pending.start;
+                let join = pending.task.await;
+                (start, join)
+            }, if pending_prefetch.is_some() => {
+                let (start, join) = prefetch_join;
+                let events = join.context("failed joining history prefetch task")??;
+                if history_pager.next_older_start() == Some(start) {
+                    apply_loaded_history_events(
+                        start,
+                        events,
+                        &mut history_pager,
+                        &runtime,
+                        &mut display_lines,
+                        view_width,
+                        &mut scroll_offset,
+                        &mut rendered_line_cache,
+                    );
+                }
             }
             maybe_line = msg_rx.recv() => {
                 match maybe_line {
@@ -851,6 +978,10 @@ pub async fn run_tui_loop(
         handle.abort();
         let _ = handle.await;
     }
+    if let Some(pending) = pending_prefetch.take() {
+        pending.task.abort();
+        let _ = pending.task.await;
+    }
 
     terminal
         .show_cursor()
@@ -864,6 +995,7 @@ fn render(
     agent_statuses: &BTreeMap<String, AgentStatusEntry>,
     textarea: &TextArea,
     scroll_offset: u16,
+    rendered_line_cache: &mut RenderedLineCache,
 ) {
     let input_height = input_height_for_textarea(textarea, frame.area().width);
     let chunks = Layout::vertical([
@@ -873,26 +1005,28 @@ fn render(
     ])
     .split(frame.area());
 
-    let messages_block = Block::bordered();
-    let messages = Paragraph::new(lines_to_text(lines))
-        .block(messages_block)
-        .scroll((scroll_offset, 0))
-        .wrap(Wrap { trim: false });
+    let message_view_height = chunks[0].height.saturating_sub(2).max(1);
+    let message_view_width = chunks[0].width.saturating_sub(2).max(1);
+    let total_rows = rendered_line_cache.total_rows(lines, message_view_width);
+    let view_end = scroll_offset
+        .saturating_add(message_view_height)
+        .min(total_rows.min(u16::MAX as usize) as u16);
+    let visible_rows = rendered_line_cache.visible_rows(
+        lines,
+        message_view_width,
+        scroll_offset,
+        message_view_height,
+    );
+    let messages_block = Block::bordered()
+        .title(format!(" Chat {view_end}/{total_rows} "))
+        .border_style(Style::default().fg(Color::DarkGray));
+    let messages = Paragraph::new(Text::from(visible_rows)).block(messages_block);
     frame.render_widget(messages, chunks[0]);
     frame.render_widget(
         Paragraph::new(Text::from(build_status_line(agent_statuses))),
         chunks[1],
     );
     render_input(frame, chunks[2], textarea);
-}
-
-fn lines_to_text(lines: &[DisplayLine]) -> Text<'static> {
-    Text::from(
-        lines
-            .iter()
-            .flat_map(DisplayLine::to_styled_lines)
-            .collect::<Vec<_>>(),
-    )
 }
 
 fn build_textarea(prompt: &str) -> TextArea<'static> {
@@ -917,7 +1051,7 @@ fn max_scroll_offset_for_view(
     rendered_line_cache: &mut RenderedLineCache,
 ) -> u16 {
     rendered_line_cache
-        .line_count(lines, view_width)
+        .total_rows(lines, view_width)
         .saturating_sub(view_height.max(1) as usize) as u16
 }
 
@@ -1043,6 +1177,120 @@ fn input_rendered_line_count(textarea: &TextArea, content_width: u16) -> usize {
         .max(1)
 }
 
+fn maybe_start_history_prefetch(
+    pending_prefetch: &mut Option<HistoryPrefetch>,
+    history_pager: &SessionHistoryPager,
+    auto_scroll: bool,
+    scroll_offset: u16,
+    view_height: u16,
+) {
+    if pending_prefetch.is_some() || auto_scroll {
+        return;
+    }
+
+    let Some(start) = history_pager.next_older_start() else {
+        return;
+    };
+
+    if scroll_offset > prefetch_top_trigger_rows(view_height) {
+        return;
+    }
+
+    let session_file = history_pager.session_file.clone();
+    let line_offsets = history_pager.line_offsets.clone();
+    let end = history_pager.loaded_start;
+    let task = tokio::spawn(async move {
+        load_session_events_range(session_file, line_offsets, start, end).await
+    });
+    *pending_prefetch = Some(HistoryPrefetch { start, task });
+}
+
+async fn prepend_next_older_page(
+    history_pager: &mut SessionHistoryPager,
+    runtime: &ChatRuntime,
+    pending_prefetch: &mut Option<HistoryPrefetch>,
+    display_lines: &mut Vec<DisplayLine>,
+    view_width: u16,
+    scroll_offset: &mut u16,
+    rendered_line_cache: &mut RenderedLineCache,
+) -> Result<bool> {
+    let Some(expected_start) = history_pager.next_older_start() else {
+        return Ok(false);
+    };
+
+    if let Some(pending) = pending_prefetch.take() {
+        if pending.start == expected_start {
+            let events = pending
+                .task
+                .await
+                .context("failed joining history prefetch task")??;
+            return Ok(apply_loaded_history_events(
+                expected_start,
+                events,
+                history_pager,
+                runtime,
+                display_lines,
+                view_width,
+                scroll_offset,
+                rendered_line_cache,
+            ));
+        }
+        pending.task.abort();
+        let _ = pending.task.await;
+    }
+
+    prepend_older_history_page(
+        history_pager,
+        runtime,
+        display_lines,
+        view_width,
+        scroll_offset,
+        rendered_line_cache,
+    )
+    .await
+}
+
+fn apply_loaded_history_events(
+    start: usize,
+    events: Vec<MessageEvent>,
+    history_pager: &mut SessionHistoryPager,
+    runtime: &ChatRuntime,
+    display_lines: &mut Vec<DisplayLine>,
+    view_width: u16,
+    scroll_offset: &mut u16,
+    rendered_line_cache: &mut RenderedLineCache,
+) -> bool {
+    history_pager.loaded_start = start;
+    let older_lines = events
+        .iter()
+        .map(|event| runtime.display_line_for_event(event))
+        .collect::<Vec<_>>();
+    prepend_history_lines(
+        older_lines,
+        display_lines,
+        view_width,
+        scroll_offset,
+        rendered_line_cache,
+    )
+}
+
+fn prepend_history_lines(
+    older_lines: Vec<DisplayLine>,
+    display_lines: &mut Vec<DisplayLine>,
+    view_width: u16,
+    scroll_offset: &mut u16,
+    rendered_line_cache: &mut RenderedLineCache,
+) -> bool {
+    if older_lines.is_empty() {
+        return false;
+    }
+    let added_rows = rendered_line_count(&older_lines, view_width).min(u16::MAX as usize) as u16;
+    display_lines.splice(0..0, older_lines);
+    rendered_line_cache.invalidate();
+    *scroll_offset = scroll_offset.saturating_add(added_rows);
+    true
+}
+
 async fn prepend_older_history_page(
     history_pager: &mut SessionHistoryPager,
     runtime: &ChatRuntime,
@@ -1052,15 +1300,13 @@ async fn prepend_older_history_page(
     rendered_line_cache: &mut RenderedLineCache,
 ) -> Result<bool> {
     let older_lines = history_pager.load_older_page(runtime).await?;
-    if older_lines.is_empty() {
-        return Ok(false);
-    }
-
-    let added_rows = rendered_line_count(&older_lines, view_width).min(u16::MAX as usize) as u16;
-    display_lines.splice(0..0, older_lines);
-    rendered_line_cache.invalidate();
-    *scroll_offset = scroll_offset.saturating_add(added_rows);
-    Ok(true)
+    Ok(prepend_history_lines(
+        older_lines,
+        display_lines,
+        view_width,
+        scroll_offset,
+        rendered_line_cache,
+    ))
 }
 
 async fn load_session_line_offsets(session_file: PathBuf) -> Result<Vec<u64>> {
@@ -1191,17 +1437,97 @@ fn load_session_events_range_blocking(
 }
 
 fn rendered_line_count(lines: &[DisplayLine], view_width: u16) -> usize {
-    Paragraph::new(lines_to_text(lines))
-        .wrap(Wrap { trim: false })
-        .line_count(view_width.max(1))
+    rendered_rows_for_lines(lines, view_width).len()
 }
 
-fn scroll_step_for_key(key: &KeyEvent) -> u16 {
-    if is_page_up_alias(key) || is_page_down_alias(key) {
-        KEY_SCROLL_STEP
+fn rendered_rows_for_lines(lines: &[DisplayLine], view_width: u16) -> Vec<Line<'static>> {
+    let view_width = view_width.max(1) as usize;
+    let mut rows = Vec::new();
+    for line in lines {
+        for styled_line in line.to_styled_lines() {
+            append_wrapped_rows(&styled_line, view_width, &mut rows);
+        }
+    }
+    if rows.is_empty() {
+        rows.push(Line::default());
+    }
+    rows
+}
+
+fn append_wrapped_rows(line: &Line<'static>, view_width: usize, rows: &mut Vec<Line<'static>>) {
+    let mut current_spans = Vec::new();
+    let mut current_width = 0_usize;
+
+    for span in &line.spans {
+        let style = span.style;
+        let mut segment = String::new();
+        for ch in span.content.chars() {
+            let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if char_width > 0
+                && current_width > 0
+                && current_width.saturating_add(char_width) > view_width
+            {
+                if !segment.is_empty() {
+                    current_spans.push(Span::styled(std::mem::take(&mut segment), style));
+                }
+                rows.push(Line::from(std::mem::take(&mut current_spans)));
+                current_width = 0;
+            }
+
+            segment.push(ch);
+            current_width = current_width.saturating_add(char_width);
+        }
+        if !segment.is_empty() {
+            current_spans.push(Span::styled(segment, style));
+        }
+    }
+
+    if current_spans.is_empty() {
+        rows.push(Line::default());
+    } else {
+        rows.push(Line::from(current_spans));
+    }
+}
+
+fn scroll_step_for_key(key: &KeyEvent, view_height: u16) -> u16 {
+    if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
+        page_scroll_step(view_height)
+    } else if key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('p' | 'P' | 'n' | 'N'))
+    {
+        half_page_scroll_step(view_height)
     } else {
         1
     }
+}
+
+fn page_scroll_step(view_height: u16) -> u16 {
+    view_height
+        .saturating_sub(PAGE_SCROLL_KEEP_CONTEXT_ROWS)
+        .max(1)
+}
+
+fn half_page_scroll_step(view_height: u16) -> u16 {
+    (view_height / 2).max(1)
+}
+
+fn prefetch_top_trigger_rows(view_height: u16) -> u16 {
+    half_page_scroll_step(view_height).max(PREFETCH_TOP_TRIGGER_MIN_ROWS)
+}
+
+fn accelerated_scroll_step(base_step: u16, streak: u8) -> u16 {
+    let ratio_pct = match streak {
+        0 | 1 => 100_u32,
+        2 => 140,
+        3 => 180,
+        4 => 220,
+        _ => 260,
+    };
+    let scaled = (base_step as u32)
+        .saturating_mul(ratio_pct)
+        .saturating_add(99)
+        / 100;
+    scaled.min(u16::MAX as u32) as u16
 }
 
 fn is_submit_key(key: &KeyEvent) -> bool {
@@ -1383,6 +1709,12 @@ mod tests {
     }
 
     #[test]
+    fn rendered_line_count_handles_wide_chars() {
+        let lines = vec![DisplayLine::System("你好你好".to_string())];
+        assert_eq!(rendered_line_count(&lines, 4), 2);
+    }
+
+    #[test]
     fn agent_multiline_render_keeps_single_blank_line_without_indent_padding() {
         let lines = DisplayLine::Agent {
             ts: "00:00:00".to_string(),
@@ -1409,17 +1741,57 @@ mod tests {
     }
 
     #[test]
-    fn page_up_down_use_fixed_small_step() {
+    fn page_up_down_use_view_relative_steps() {
         let page_up = key_event(KeyCode::PageUp, KeyModifiers::empty());
         let ctrl_p = key_event(KeyCode::Char('p'), KeyModifiers::CONTROL);
         let ctrl_n = key_event(KeyCode::Char('n'), KeyModifiers::CONTROL);
         let ctrl_up = key_event(KeyCode::Up, KeyModifiers::CONTROL);
-        assert_eq!(scroll_step_for_key(&page_up), KEY_SCROLL_STEP);
-        assert_eq!(scroll_step_for_key(&ctrl_p), KEY_SCROLL_STEP);
-        assert_eq!(scroll_step_for_key(&ctrl_n), KEY_SCROLL_STEP);
+        assert_eq!(scroll_step_for_key(&page_up, 20), 18);
+        assert_eq!(scroll_step_for_key(&ctrl_p, 20), 10);
+        assert_eq!(scroll_step_for_key(&ctrl_n, 20), 10);
         assert!(is_scroll_up(&ctrl_p));
         assert!(is_scroll_down(&ctrl_n));
-        assert_eq!(scroll_step_for_key(&ctrl_up), 1);
+        assert_eq!(scroll_step_for_key(&ctrl_up, 20), 1);
+        assert_eq!(scroll_step_for_key(&page_up, 1), 1);
+        assert_eq!(scroll_step_for_key(&ctrl_p, 1), 1);
+    }
+
+    #[test]
+    fn scroll_momentum_accelerates_for_fast_repeated_input() {
+        let mut momentum = ScrollMomentum::default();
+        let now = Instant::now();
+        let step1 = momentum.next_step(ScrollDirection::Up, 10, now);
+        let step2 = momentum.next_step(ScrollDirection::Up, 10, now + Duration::from_millis(40));
+        let step3 = momentum.next_step(ScrollDirection::Up, 10, now + Duration::from_millis(80));
+        assert_eq!(step1, 10);
+        assert!(step2 > step1);
+        assert!(step3 > step2);
+    }
+
+    #[test]
+    fn scroll_momentum_resets_after_pause_or_direction_change() {
+        let mut momentum = ScrollMomentum::default();
+        let now = Instant::now();
+        let _ = momentum.next_step(ScrollDirection::Up, 10, now);
+        let _ = momentum.next_step(ScrollDirection::Up, 10, now + Duration::from_millis(40));
+        let step_after_pause = momentum.next_step(
+            ScrollDirection::Up,
+            10,
+            now + Duration::from_millis(40) + SCROLL_ACCEL_WINDOW + Duration::from_millis(1),
+        );
+        assert_eq!(step_after_pause, 10);
+        let step_other_dir = momentum.next_step(
+            ScrollDirection::Down,
+            10,
+            now + Duration::from_millis(40) + SCROLL_ACCEL_WINDOW + Duration::from_millis(20),
+        );
+        assert_eq!(step_other_dir, 10);
+    }
+
+    #[test]
+    fn prefetch_trigger_uses_half_page_with_minimum() {
+        assert_eq!(prefetch_top_trigger_rows(20), 10);
+        assert_eq!(prefetch_top_trigger_rows(2), PREFETCH_TOP_TRIGGER_MIN_ROWS);
     }
 
     #[test]

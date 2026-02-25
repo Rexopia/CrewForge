@@ -31,6 +31,8 @@ use crate::tui::DisplayLine;
 const INIT_PLACEHOLDER_MCP_URL: &str = "http://127.0.0.1:0/mcp?token=init";
 const MIN_ENABLED_AGENTS: usize = 2;
 const CHAT_SETUP_CANCELED_MESSAGE: &str = "chat setup canceled by user";
+const DEMO_DEFAULT_MESSAGES: usize = 240;
+const DEMO_MAX_MESSAGES: usize = 5_000;
 
 #[derive(Debug, Clone)]
 pub struct ChatArgs {
@@ -1444,6 +1446,28 @@ pub(crate) async fn handle_user_input(
         return Ok(false);
     }
 
+    if user_input == "/demo" || user_input.starts_with("/demo ") {
+        if !runtime.dry_run {
+            runtime.print_system_line("[demo] available only in --dry-run mode.");
+            return Ok(false);
+        }
+
+        let count = match parse_demo_message_count(&user_input) {
+            Ok(count) => count,
+            Err(error) => {
+                runtime.print_system_line(&format!("[demo] {error}"));
+                return Ok(false);
+            }
+        };
+
+        runtime.print_system_line(&format!(
+            "[demo] generating {count} synthetic messages for TUI preview..."
+        ));
+        inject_demo_messages(runtime.clone(), count).await?;
+        runtime.print_system_line(&format!("[demo] generated {count} messages."));
+        return Ok(false);
+    }
+
     runtime
         .add_message(
             MessageRole::Human,
@@ -1482,8 +1506,88 @@ fn spawn_watchdog(
     })
 }
 
+fn parse_demo_message_count(user_input: &str) -> Result<usize> {
+    let mut parts = user_input.split_whitespace();
+    let command = parts.next().unwrap_or_default();
+    if command != "/demo" {
+        bail!("usage: /demo [count]");
+    }
+
+    let count = match parts.next() {
+        Some(raw_count) => {
+            let parsed = raw_count
+                .parse::<usize>()
+                .with_context(|| format!("invalid count: {raw_count}"))?;
+            if parsed == 0 {
+                bail!("count must be greater than zero");
+            }
+            parsed.min(DEMO_MAX_MESSAGES)
+        }
+        None => DEMO_DEFAULT_MESSAGES,
+    };
+
+    if parts.next().is_some() {
+        bail!("usage: /demo [count]");
+    }
+
+    Ok(count)
+}
+
+async fn inject_demo_messages(runtime: Arc<ChatRuntime>, count: usize) -> Result<()> {
+    let topics = [
+        "event-loop latency",
+        "TUI readability",
+        "history pagination",
+        "provider timeouts",
+        "MCP routing",
+    ];
+    let human_name = runtime.room.human.clone();
+    let agents = runtime.runtime_agents.as_ref();
+    if agents.is_empty() {
+        return Ok(());
+    }
+
+    for idx in 0..count {
+        if idx % 4 == 0 {
+            let topic = topics[idx % topics.len()];
+            let text = format!(
+                "Focus point #{idx}: we should test long wraps on {topic}. \
+This line intentionally includes wide chars for wrapping: 你好，渲染路径需要保持稳定。"
+            );
+            runtime
+                .add_message(MessageRole::Human, human_name.clone(), text, None)
+                .await?;
+        } else {
+            let agent = &agents[idx % agents.len()];
+            let text = if idx % 7 == 0 {
+                format!(
+                    "Preview response #{idx}:\n1) keep scroll smooth under long history\n2) avoid full-frame rebuild on every key press"
+                )
+            } else {
+                format!(
+                    "Preview response #{idx}: batching visible rows should reduce redraw overhead while preserving readability."
+                )
+            };
+            runtime
+                .add_message(
+                    MessageRole::Agent,
+                    agent.name.clone(),
+                    text,
+                    Some(agent.id.clone()),
+                )
+                .await?;
+        }
+
+        if idx % 64 == 63 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    Ok(())
+}
+
 fn help_text() -> &'static str {
-    "Commands:\n  /help    Show help\n  /agents  List members\n  /exit    Quit chat\n  /quit    Quit chat (alias)\n\nInput:\n  Enter            Send message\n  Ctrl+J           Insert newline\n  Ctrl+C           Clear current input\n  Ctrl+D           Exit chat\n  Esc              Cancel active agent calls\n\nNavigation:\n  PageUp/PageDown  Scroll chat (3 lines)\n  Ctrl+P/N         Scroll chat (3 lines)\n  Home/End         Jump to top/bottom\n  Alt+Up/Down      Scroll chat (1 line)\n  Ctrl+Up/Down     Scroll chat (1 line)\n\nSession:\n  Resume: crewforge chat --resume <session-id|path>"
+    "Commands:\n  /help      Show help\n  /agents    List members\n  /demo [N]  Generate synthetic transcript (dry-run only)\n  /exit      Quit chat\n  /quit      Quit chat (alias)\n\nInput:\n  Enter            Send message\n  Ctrl+J           Insert newline\n  Ctrl+C           Clear current input\n  Ctrl+D           Exit chat\n  Esc              Cancel active agent calls\n\nNavigation:\n  PageUp/PageDown  Scroll chat (one page, repeat to accelerate)\n  Ctrl+P/N         Scroll chat (half page, repeat to accelerate)\n  Home/End         Jump to top/bottom\n  Alt+Up/Down      Scroll chat (1 line)\n  Ctrl+Up/Down     Scroll chat (1 line)\n\nSession:\n  Resume: crewforge chat --resume <session-id|path>"
 }
 
 fn build_event_turn_prompt(
@@ -1800,12 +1904,39 @@ mod tests {
         assert!(help_text().contains("crewforge chat"));
         assert!(!help_text().contains("npm run chat"));
         assert!(help_text().contains("--resume"));
+        assert!(help_text().contains("/demo [N]"));
         assert!(help_text().contains("PageUp/PageDown"));
         assert!(help_text().contains("Ctrl+P/N"));
+        assert!(help_text().contains("one page"));
+        assert!(help_text().contains("half page"));
+        assert!(help_text().contains("repeat to accelerate"));
         assert!(help_text().contains("Ctrl+J"));
         assert!(help_text().contains("Ctrl+C"));
         assert!(help_text().contains("Ctrl+D"));
         assert!(help_text().contains("Esc"));
+    }
+
+    #[test]
+    fn parse_demo_message_count_uses_default() {
+        assert_eq!(
+            parse_demo_message_count("/demo").expect("parse default"),
+            DEMO_DEFAULT_MESSAGES
+        );
+    }
+
+    #[test]
+    fn parse_demo_message_count_accepts_explicit_value() {
+        assert_eq!(
+            parse_demo_message_count("/demo 42").expect("parse explicit"),
+            42
+        );
+    }
+
+    #[test]
+    fn parse_demo_message_count_rejects_invalid_or_zero() {
+        assert!(parse_demo_message_count("/demo wow").is_err());
+        assert!(parse_demo_message_count("/demo 0").is_err());
+        assert!(parse_demo_message_count("/demo 1 2").is_err());
     }
 
     #[test]
