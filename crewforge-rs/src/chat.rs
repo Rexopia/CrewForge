@@ -1587,7 +1587,7 @@ This line intentionally includes wide chars for wrapping: 你好，渲染路径�
 }
 
 fn help_text() -> &'static str {
-    "Commands:\n  /help      Show help\n  /agents    List members\n  /demo [N]  Generate synthetic transcript (dry-run only)\n  /exit      Quit chat\n  /quit      Quit chat (alias)\n\nInput:\n  Enter            Send message\n  Ctrl+J           Insert newline\n  Ctrl+C           Clear current input\n  Ctrl+D           Exit chat\n  Esc              Cancel active agent calls\n\nNavigation:\n  PageUp/PageDown  Scroll chat (one page, repeat to accelerate)\n  Ctrl+P/N         Scroll chat (half page, repeat to accelerate)\n  Home/End         Jump to top/bottom\n  Alt+Up/Down      Scroll chat (1 line)\n  Ctrl+Up/Down     Scroll chat (1 line)\n\nSession:\n  Resume: crewforge chat --resume <session-id|path>"
+    "Commands:\n  /help      Show help\n  /agents    List members\n  /demo [N]  Generate synthetic transcript (dry-run only)\n  /exit      Quit chat\n  /quit      Quit chat (alias)\n\nInput:\n  Enter            Send message\n  Ctrl+J           Insert newline\n  Ctrl+C           Clear current input\n  Ctrl+D           Exit chat\n  Esc              Cancel active agent calls\n\nNavigation:\n  PageUp/PageDown  Scroll chat (one page, repeat to accelerate)\n  Ctrl+P/N         Scroll chat (half page, repeat to accelerate)\n  Home/End         Jump to top/bottom\n  Alt+Up/Down      Scroll chat (1 line)\n  Ctrl+Up/Down     Scroll chat (1 line)\n  Ctrl+T           Toggle view density (comfort/compact)\n\nSession:\n  Resume: crewforge chat --resume <session-id|path>"
 }
 
 fn build_event_turn_prompt(
@@ -1914,6 +1914,8 @@ mod tests {
         assert!(help_text().contains("Ctrl+C"));
         assert!(help_text().contains("Ctrl+D"));
         assert!(help_text().contains("Esc"));
+        assert!(help_text().contains("Ctrl+T"));
+        assert!(help_text().contains("comfort/compact"));
     }
 
     #[test]

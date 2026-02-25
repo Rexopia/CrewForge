@@ -16,7 +16,8 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode,
 };
 use futures::StreamExt;
 use ratatui::backend::CrosstermBackend;
@@ -45,6 +46,7 @@ const PAGE_SCROLL_KEEP_CONTEXT_ROWS: u16 = 2;
 const PREFETCH_TOP_TRIGGER_MIN_ROWS: u16 = 4;
 const HISTORY_PAGE_MESSAGES: usize = 200;
 const TUI_TICK_INTERVAL: Duration = Duration::from_millis(16);
+const RENDER_BATCH_INTERVAL: Duration = Duration::from_millis(14);
 const SCROLL_ACCEL_WINDOW: Duration = Duration::from_millis(280);
 const PASTE_BURST_MIN_CHARS: u16 = 3;
 const PASTE_ENTER_SUPPRESS_WINDOW: Duration = Duration::from_millis(120);
@@ -95,6 +97,33 @@ enum PasteFlushResult {
 enum ScrollDirection {
     Up,
     Down,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum UiDensity {
+    #[default]
+    Comfort,
+    Compact,
+}
+
+impl UiDensity {
+    fn toggle(self) -> Self {
+        match self {
+            Self::Comfort => Self::Compact,
+            Self::Compact => Self::Comfort,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Comfort => "comfort",
+            Self::Compact => "compact",
+        }
+    }
+
+    fn is_comfort(self) -> bool {
+        matches!(self, Self::Comfort)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -260,7 +289,7 @@ impl DisplayLine {
         }
     }
 
-    fn to_styled_lines(&self) -> Vec<Line<'static>> {
+    fn to_styled_lines(&self, density: UiDensity) -> Vec<Line<'static>> {
         match self {
             DisplayLine::System(text) => split_normalized_lines(text)
                 .into_iter()
@@ -271,33 +300,49 @@ impl DisplayLine {
                     ))
                 })
                 .collect(),
-            DisplayLine::Human { ts, speaker, text } => prefixed_message_lines(
-                format!("[{ts}] {speaker}"),
-                Style::default().fg(Color::Cyan),
-                text,
-            ),
+            DisplayLine::Human { ts, speaker, text } => {
+                prefixed_message_lines(ts, speaker, Style::default().fg(Color::Cyan), text, density)
+            }
             DisplayLine::Agent {
                 ts,
                 speaker,
                 text,
                 agent_idx,
-            } => prefixed_message_lines(format!("[{ts}] {speaker}"), agent_style(*agent_idx), text),
+            } => prefixed_message_lines(ts, speaker, agent_style(*agent_idx), text, density),
             DisplayLine::AgentStatus { .. } => Vec::new(),
         }
     }
 }
 
-fn prefixed_message_lines(prefix: String, prefix_style: Style, text: &str) -> Vec<Line<'static>> {
+fn prefixed_message_lines(
+    ts: &str,
+    speaker: &str,
+    speaker_style: Style,
+    text: &str,
+    density: UiDensity,
+) -> Vec<Line<'static>> {
     let text_lines = split_normalized_lines(text);
     let mut lines = Vec::with_capacity(text_lines.len().max(1));
     let mut iter = text_lines.into_iter();
     let first = iter.next().unwrap_or_default();
     lines.push(Line::from(vec![
-        Span::styled(prefix, prefix_style),
+        Span::styled(format!("[{ts}] {speaker}"), speaker_style),
         Span::raw(format!(": {first}")),
     ]));
     for line in iter {
-        lines.push(Line::from(Span::raw(line)));
+        if line.is_empty() {
+            lines.push(Line::default());
+            continue;
+        }
+        let mut spans = Vec::new();
+        if density.is_comfort() {
+            spans.push(Span::styled(
+                "  ",
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+            ));
+        }
+        spans.push(Span::raw(line));
+        lines.push(Line::from(spans));
     }
     lines
 }
@@ -370,7 +415,7 @@ fn agent_status_symbol(state: AgentStatusState) -> &'static str {
     }
 }
 
-fn build_status_line(statuses: &BTreeMap<String, AgentStatusEntry>) -> Line<'static> {
+fn build_status_line(statuses: &BTreeMap<String, AgentStatusEntry>, density: UiDensity) -> Line<'static> {
     let has_running = statuses
         .values()
         .any(|entry| matches!(entry.state, AgentStatusState::Active));
@@ -382,10 +427,18 @@ fn build_status_line(statuses: &BTreeMap<String, AgentStatusEntry>) -> Line<'sta
     } else {
         Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM)
     };
+    let density_style = if density.is_comfort() {
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM)
+    } else {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::DIM)
+    };
 
     let mut spans = vec![
         Span::styled("Status ", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled(format!("{overall_label:<7}"), overall_style),
+        Span::raw(" | "),
+        Span::styled("View ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(density.label(), density_style),
         Span::raw(" | "),
         Span::styled("Agents ", Style::default().add_modifier(Modifier::BOLD)),
     ];
@@ -435,26 +488,34 @@ fn handle_display_line(
     display_lines: &mut Vec<DisplayLine>,
     rendered_line_cache: &mut RenderedLineCache,
     statuses: &mut BTreeMap<String, AgentStatusEntry>,
-) {
+) -> bool {
     match line {
         DisplayLine::AgentStatus {
             agent,
             status,
             reason,
-        } => update_agent_status(statuses, agent, status, reason),
+        } => {
+            update_agent_status(statuses, agent, status, reason);
+            true
+        }
         other => {
             display_lines.push(other);
             rendered_line_cache.invalidate();
+            true
         }
     }
 }
 
-fn apply_paste_flush(textarea: &mut TextArea, flush: PasteFlushResult) {
+fn apply_paste_flush(textarea: &mut TextArea, flush: PasteFlushResult) -> bool {
     match flush {
-        PasteFlushResult::None => {}
-        PasteFlushResult::Typed(ch) => textarea.insert_char(ch),
+        PasteFlushResult::None => false,
+        PasteFlushResult::Typed(ch) => {
+            textarea.insert_char(ch);
+            true
+        }
         PasteFlushResult::Paste(text) => {
             let _ = textarea.insert_str(&text);
+            true
         }
     }
 }
@@ -479,6 +540,13 @@ fn should_handle_key_event(key: &KeyEvent) -> bool {
     }
 }
 
+fn mark_render_dirty(render_dirty: &mut bool, render_pending_since: &mut Instant) {
+    if !*render_dirty {
+        *render_dirty = true;
+        *render_pending_since = Instant::now();
+    }
+}
+
 struct TerminalGuard;
 
 impl Drop for TerminalGuard {
@@ -493,10 +561,30 @@ impl Drop for TerminalGuard {
     }
 }
 
+struct SynchronizedUpdateGuard {
+    active: bool,
+}
+
+impl SynchronizedUpdateGuard {
+    fn begin() -> Self {
+        let active = execute!(std::io::stdout(), BeginSynchronizedUpdate).is_ok();
+        Self { active }
+    }
+}
+
+impl Drop for SynchronizedUpdateGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = execute!(std::io::stdout(), EndSynchronizedUpdate);
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct RenderedLineCache {
     width: u16,
     len: usize,
+    density: UiDensity,
     rows: Vec<Line<'static>>,
     valid: bool,
 }
@@ -506,18 +594,19 @@ impl RenderedLineCache {
         self.valid = false;
     }
 
-    fn ensure_rows(&mut self, lines: &[DisplayLine], view_width: u16) {
+    fn ensure_rows(&mut self, lines: &[DisplayLine], view_width: u16, density: UiDensity) {
         let view_width = view_width.max(1);
-        if !self.valid || self.width != view_width || self.len != lines.len() {
-            self.rows = rendered_rows_for_lines(lines, view_width);
+        if !self.valid || self.width != view_width || self.len != lines.len() || self.density != density {
+            self.rows = rendered_rows_for_lines(lines, view_width, density);
             self.width = view_width;
             self.len = lines.len();
+            self.density = density;
             self.valid = true;
         }
     }
 
-    fn total_rows(&mut self, lines: &[DisplayLine], view_width: u16) -> usize {
-        self.ensure_rows(lines, view_width);
+    fn total_rows(&mut self, lines: &[DisplayLine], view_width: u16, density: UiDensity) -> usize {
+        self.ensure_rows(lines, view_width, density);
         self.rows.len()
     }
 
@@ -527,8 +616,9 @@ impl RenderedLineCache {
         view_width: u16,
         scroll_offset: u16,
         view_height: u16,
+        density: UiDensity,
     ) -> Vec<Line<'static>> {
-        self.ensure_rows(lines, view_width);
+        self.ensure_rows(lines, view_width, density);
         let start = scroll_offset as usize;
         if start >= self.rows.len() {
             return vec![Line::default()];
@@ -658,9 +748,12 @@ pub async fn run_tui_loop(
     let (mut history_pager, mut display_lines) =
         SessionHistoryPager::open(session_file, &runtime).await?;
     let mut agent_statuses = initial_agent_statuses(&runtime.agent_names());
+    let mut ui_density = UiDensity::default();
     let mut scroll_offset: u16 = 0;
-    let mut view_height: u16;
-    let mut view_width: u16;
+    let (mut view_height, mut view_width) = message_view_dimensions(
+        size_to_rect(terminal.size().context("failed to read terminal size")?),
+        &textarea,
+    );
     let mut auto_scroll = true;
     let mut rendered_line_cache = RenderedLineCache::default();
     let mut event_stream = EventStream::new();
@@ -669,65 +762,77 @@ pub async fn run_tui_loop(
     let mut pending_prefetch: Option<HistoryPrefetch> = None;
     let mut watchdog_handle: Option<JoinHandle<()>> = None;
     let mut seen_human_message = false;
+    let mut render_dirty = true;
+    let mut render_pending_since = Instant::now()
+        .checked_sub(RENDER_BATCH_INTERVAL)
+        .unwrap_or_else(Instant::now);
 
     'main: loop {
-        (view_height, view_width) = message_view_dimensions(
-            size_to_rect(terminal.size().context("failed to read terminal size")?),
-            &textarea,
-        );
+        if render_dirty && render_pending_since.elapsed() >= RENDER_BATCH_INTERVAL {
+            (view_height, view_width) = message_view_dimensions(
+                size_to_rect(terminal.size().context("failed to read terminal size")?),
+                &textarea,
+            );
 
-        let mut channel_closed = false;
-        loop {
-            match msg_rx.try_recv() {
-                Ok(line) => handle_display_line(
-                    line,
-                    &mut display_lines,
-                    &mut rendered_line_cache,
-                    &mut agent_statuses,
-                ),
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    channel_closed = true;
-                    break;
+            let mut channel_closed = false;
+            loop {
+                match msg_rx.try_recv() {
+                    Ok(line) => {
+                        let _ = handle_display_line(
+                            line,
+                            &mut display_lines,
+                            &mut rendered_line_cache,
+                            &mut agent_statuses,
+                        );
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        channel_closed = true;
+                        break;
+                    }
                 }
             }
-        }
 
-        let max_scroll = max_scroll_offset_for_view(
-            &display_lines,
-            view_height,
-            view_width,
-            &mut rendered_line_cache,
-        );
-        if auto_scroll {
-            scroll_offset = max_scroll;
-        } else {
-            scroll_offset = scroll_offset.min(max_scroll);
-        }
+            let max_scroll = max_scroll_offset_for_view(
+                &display_lines,
+                view_height,
+                view_width,
+                ui_density,
+                &mut rendered_line_cache,
+            );
+            if auto_scroll {
+                scroll_offset = max_scroll;
+            } else {
+                scroll_offset = scroll_offset.min(max_scroll);
+            }
 
-        maybe_start_history_prefetch(
-            &mut pending_prefetch,
-            &history_pager,
-            auto_scroll,
-            scroll_offset,
-            view_height,
-        );
+            maybe_start_history_prefetch(
+                &mut pending_prefetch,
+                &history_pager,
+                auto_scroll,
+                scroll_offset,
+                view_height,
+            );
 
-        terminal
-            .draw(|frame| {
-                render(
-                    frame,
-                    &display_lines,
-                    &agent_statuses,
-                    &textarea,
-                    scroll_offset,
-                    &mut rendered_line_cache,
-                );
-            })
-            .context("failed to draw ratatui frame")?;
+            let _sync_guard = SynchronizedUpdateGuard::begin();
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        &display_lines,
+                        &agent_statuses,
+                        &textarea,
+                        scroll_offset,
+                        ui_density,
+                        &mut rendered_line_cache,
+                    );
+                })
+                .context("failed to draw ratatui frame")?;
+            render_dirty = false;
 
-        if channel_closed || stop_flag.load(Ordering::SeqCst) {
-            break;
+            if channel_closed || stop_flag.load(Ordering::SeqCst) {
+                break;
+            }
         }
 
         tokio::select! {
@@ -739,7 +844,9 @@ pub async fn run_tui_loop(
                         }
 
                         let now = Instant::now();
-                        apply_paste_flush(&mut textarea, paste_burst.flush_if_due(now));
+                        if apply_paste_flush(&mut textarea, paste_burst.flush_if_due(now)) {
+                            mark_render_dirty(&mut render_dirty, &mut render_pending_since);
+                        }
 
                         if is_exit_key(&key) {
                             stop_flag.store(true, Ordering::SeqCst);
@@ -750,15 +857,18 @@ pub async fn run_tui_loop(
                             scroll_momentum.reset();
                             paste_burst = PasteBurst::default();
                             textarea = build_textarea(&prompt);
+                            mark_render_dirty(&mut render_dirty, &mut render_pending_since);
                             continue;
                         }
 
                         if is_cancel_agents_key(&key) {
                             scroll_momentum.reset();
-                            apply_paste_flush(
+                            if apply_paste_flush(
                                 &mut textarea,
                                 paste_burst.flush_before_non_char(),
-                            );
+                            ) {
+                                mark_render_dirty(&mut render_dirty, &mut render_pending_since);
+                            }
                             paste_burst.clear_window_after_non_char();
 
                             let canceled = runtime.cancel_active_agent_calls().await;
@@ -767,12 +877,14 @@ pub async fn run_tui_loop(
                             } else {
                                 format!("[interrupt] canceled {canceled} active agent call(s).")
                             };
-                            handle_display_line(
+                            if handle_display_line(
                                 DisplayLine::System(notice),
                                 &mut display_lines,
                                 &mut rendered_line_cache,
                                 &mut agent_statuses,
-                            );
+                            ) {
+                                mark_render_dirty(&mut render_dirty, &mut render_pending_since);
+                            }
                             auto_scroll = true;
                             continue;
                         }
@@ -783,8 +895,18 @@ pub async fn run_tui_loop(
                             continue;
                         }
 
-                        apply_paste_flush(&mut textarea, paste_burst.flush_before_non_char());
+                        if apply_paste_flush(&mut textarea, paste_burst.flush_before_non_char()) {
+                            mark_render_dirty(&mut render_dirty, &mut render_pending_since);
+                        }
                         paste_burst.clear_window_after_non_char();
+
+                        if is_toggle_density_key(&key) {
+                            scroll_momentum.reset();
+                            ui_density = ui_density.toggle();
+                            rendered_line_cache.invalidate();
+                            mark_render_dirty(&mut render_dirty, &mut render_pending_since);
+                            continue;
+                        }
 
                         if is_scroll_up(&key) {
                             auto_scroll = false;
@@ -800,6 +922,7 @@ pub async fn run_tui_loop(
                                     &mut pending_prefetch,
                                     &mut display_lines,
                                     view_width,
+                                    ui_density,
                                     &mut scroll_offset,
                                     &mut rendered_line_cache,
                                 )
@@ -809,6 +932,7 @@ pub async fn run_tui_loop(
                                 }
                             }
                             scroll_offset = scroll_offset.saturating_sub(step);
+                            mark_render_dirty(&mut render_dirty, &mut render_pending_since);
                             continue;
                         }
 
@@ -818,6 +942,7 @@ pub async fn run_tui_loop(
                                     &display_lines,
                                     view_height,
                                     view_width,
+                                    ui_density,
                                     &mut rendered_line_cache,
                                 );
                             let step = scroll_momentum.next_step(
@@ -829,6 +954,7 @@ pub async fn run_tui_loop(
                                 .saturating_add(step)
                                 .min(max_scroll);
                             auto_scroll = scroll_offset >= max_scroll;
+                            mark_render_dirty(&mut render_dirty, &mut render_pending_since);
                             continue;
                         }
 
@@ -839,6 +965,7 @@ pub async fn run_tui_loop(
                             // Jump to the top of currently loaded history only.
                             // Older pages remain lazy-loaded by scroll-up actions.
                             scroll_offset = 0;
+                            mark_render_dirty(&mut render_dirty, &mut render_pending_since);
                             continue;
                         }
 
@@ -848,10 +975,12 @@ pub async fn run_tui_loop(
                                     &display_lines,
                                     view_height,
                                     view_width,
+                                    ui_density,
                                     &mut rendered_line_cache,
                                 );
                             scroll_offset = max_scroll;
                             auto_scroll = true;
+                            mark_render_dirty(&mut render_dirty, &mut render_pending_since);
                             continue;
                         }
 
@@ -859,6 +988,7 @@ pub async fn run_tui_loop(
                             || (is_submit_key(&key) && paste_burst.should_treat_enter_as_newline(now))
                         {
                             textarea.insert_newline();
+                            mark_render_dirty(&mut render_dirty, &mut render_pending_since);
                             continue;
                         }
 
@@ -879,21 +1009,28 @@ pub async fn run_tui_loop(
                             if should_exit {
                                 break 'main;
                             }
+                            mark_render_dirty(&mut render_dirty, &mut render_pending_since);
                             continue;
                         }
 
                         textarea.input(key);
+                        mark_render_dirty(&mut render_dirty, &mut render_pending_since);
                     }
                     Some(Ok(Event::Paste(data))) => {
                         scroll_momentum.reset();
-                        apply_paste_flush(&mut textarea, paste_burst.flush_before_non_char());
+                        if apply_paste_flush(&mut textarea, paste_burst.flush_before_non_char()) {
+                            mark_render_dirty(&mut render_dirty, &mut render_pending_since);
+                        }
                         paste_burst.clear_window_after_non_char();
                         textarea.insert_str(normalize_newlines(&data));
+                        mark_render_dirty(&mut render_dirty, &mut render_pending_since);
                         continue;
                     }
                     Some(Ok(Event::Resize(new_width, new_height))) => {
                         scroll_momentum.reset();
-                        apply_paste_flush(&mut textarea, paste_burst.flush_before_non_char());
+                        if apply_paste_flush(&mut textarea, paste_burst.flush_before_non_char()) {
+                            mark_render_dirty(&mut render_dirty, &mut render_pending_since);
+                        }
                         paste_burst.clear_window_after_non_char();
                         (view_height, view_width) = message_view_dimensions(
                             Rect::new(0, 0, new_width, new_height),
@@ -904,6 +1041,7 @@ pub async fn run_tui_loop(
                                 &display_lines,
                                 view_height,
                                 view_width,
+                                ui_density,
                                 &mut rendered_line_cache,
                             );
                         if auto_scroll {
@@ -911,6 +1049,7 @@ pub async fn run_tui_loop(
                         } else {
                             scroll_offset = scroll_offset.min(max_scroll);
                         }
+                        mark_render_dirty(&mut render_dirty, &mut render_pending_since);
                     }
                     Some(Ok(_)) => {}
                     Some(Err(error)) => {
@@ -919,8 +1058,11 @@ pub async fn run_tui_loop(
                     None => break 'main,
                 }
             }
+            _ = sleep(RENDER_BATCH_INTERVAL), if render_dirty => {}
             _ = sleep(TUI_TICK_INTERVAL), if paste_burst.needs_tick() => {
-                apply_paste_flush(&mut textarea, paste_burst.flush_if_due(Instant::now()));
+                if apply_paste_flush(&mut textarea, paste_burst.flush_if_due(Instant::now())) {
+                    mark_render_dirty(&mut render_dirty, &mut render_pending_since);
+                }
             }
             prefetch_join = async {
                 let pending = pending_prefetch
@@ -933,33 +1075,39 @@ pub async fn run_tui_loop(
                 let (start, join) = prefetch_join;
                 let events = join.context("failed joining history prefetch task")??;
                 if history_pager.next_older_start() == Some(start) {
-                    apply_loaded_history_events(
+                    if apply_loaded_history_events(
                         start,
                         events,
                         &mut history_pager,
                         &runtime,
                         &mut display_lines,
                         view_width,
+                        ui_density,
                         &mut scroll_offset,
                         &mut rendered_line_cache,
-                    );
+                    ) {
+                        mark_render_dirty(&mut render_dirty, &mut render_pending_since);
+                    }
                 }
             }
             maybe_line = msg_rx.recv() => {
                 match maybe_line {
                     Some(line) => {
-                        handle_display_line(
+                        if handle_display_line(
                             line,
                             &mut display_lines,
                             &mut rendered_line_cache,
                             &mut agent_statuses,
-                        );
+                        ) {
+                            mark_render_dirty(&mut render_dirty, &mut render_pending_since);
+                        }
                         if auto_scroll {
                             scroll_offset =
                                 max_scroll_offset_for_view(
                                     &display_lines,
                                     view_height,
                                     view_width,
+                                    ui_density,
                                     &mut rendered_line_cache,
                                 );
                         }
@@ -995,6 +1143,7 @@ fn render(
     agent_statuses: &BTreeMap<String, AgentStatusEntry>,
     textarea: &TextArea,
     scroll_offset: u16,
+    density: UiDensity,
     rendered_line_cache: &mut RenderedLineCache,
 ) {
     let input_height = input_height_for_textarea(textarea, frame.area().width);
@@ -1007,7 +1156,7 @@ fn render(
 
     let message_view_height = chunks[0].height.saturating_sub(2).max(1);
     let message_view_width = chunks[0].width.saturating_sub(2).max(1);
-    let total_rows = rendered_line_cache.total_rows(lines, message_view_width);
+    let total_rows = rendered_line_cache.total_rows(lines, message_view_width, density);
     let view_end = scroll_offset
         .saturating_add(message_view_height)
         .min(total_rows.min(u16::MAX as usize) as u16);
@@ -1016,14 +1165,18 @@ fn render(
         message_view_width,
         scroll_offset,
         message_view_height,
+        density,
     );
     let messages_block = Block::bordered()
-        .title(format!(" Chat {view_end}/{total_rows} "))
+        .title(format!(
+            " Chat {view_end}/{total_rows} [{}] ",
+            density.label()
+        ))
         .border_style(Style::default().fg(Color::DarkGray));
     let messages = Paragraph::new(Text::from(visible_rows)).block(messages_block);
     frame.render_widget(messages, chunks[0]);
     frame.render_widget(
-        Paragraph::new(Text::from(build_status_line(agent_statuses))),
+        Paragraph::new(Text::from(build_status_line(agent_statuses, density))),
         chunks[1],
     );
     render_input(frame, chunks[2], textarea);
@@ -1048,10 +1201,11 @@ fn max_scroll_offset_for_view(
     lines: &[DisplayLine],
     view_height: u16,
     view_width: u16,
+    density: UiDensity,
     rendered_line_cache: &mut RenderedLineCache,
 ) -> u16 {
     rendered_line_cache
-        .total_rows(lines, view_width)
+        .total_rows(lines, view_width, density)
         .saturating_sub(view_height.max(1) as usize) as u16
 }
 
@@ -1211,6 +1365,7 @@ async fn prepend_next_older_page(
     pending_prefetch: &mut Option<HistoryPrefetch>,
     display_lines: &mut Vec<DisplayLine>,
     view_width: u16,
+    density: UiDensity,
     scroll_offset: &mut u16,
     rendered_line_cache: &mut RenderedLineCache,
 ) -> Result<bool> {
@@ -1231,6 +1386,7 @@ async fn prepend_next_older_page(
                 runtime,
                 display_lines,
                 view_width,
+                density,
                 scroll_offset,
                 rendered_line_cache,
             ));
@@ -1244,6 +1400,7 @@ async fn prepend_next_older_page(
         runtime,
         display_lines,
         view_width,
+        density,
         scroll_offset,
         rendered_line_cache,
     )
@@ -1257,6 +1414,7 @@ fn apply_loaded_history_events(
     runtime: &ChatRuntime,
     display_lines: &mut Vec<DisplayLine>,
     view_width: u16,
+    density: UiDensity,
     scroll_offset: &mut u16,
     rendered_line_cache: &mut RenderedLineCache,
 ) -> bool {
@@ -1269,6 +1427,7 @@ fn apply_loaded_history_events(
         older_lines,
         display_lines,
         view_width,
+        density,
         scroll_offset,
         rendered_line_cache,
     )
@@ -1278,13 +1437,14 @@ fn prepend_history_lines(
     older_lines: Vec<DisplayLine>,
     display_lines: &mut Vec<DisplayLine>,
     view_width: u16,
+    density: UiDensity,
     scroll_offset: &mut u16,
     rendered_line_cache: &mut RenderedLineCache,
 ) -> bool {
     if older_lines.is_empty() {
         return false;
     }
-    let added_rows = rendered_line_count(&older_lines, view_width).min(u16::MAX as usize) as u16;
+    let added_rows = rendered_line_count(&older_lines, view_width, density).min(u16::MAX as usize) as u16;
     display_lines.splice(0..0, older_lines);
     rendered_line_cache.invalidate();
     *scroll_offset = scroll_offset.saturating_add(added_rows);
@@ -1296,6 +1456,7 @@ async fn prepend_older_history_page(
     runtime: &ChatRuntime,
     display_lines: &mut Vec<DisplayLine>,
     view_width: u16,
+    density: UiDensity,
     scroll_offset: &mut u16,
     rendered_line_cache: &mut RenderedLineCache,
 ) -> Result<bool> {
@@ -1304,6 +1465,7 @@ async fn prepend_older_history_page(
         older_lines,
         display_lines,
         view_width,
+        density,
         scroll_offset,
         rendered_line_cache,
     ))
@@ -1436,17 +1598,25 @@ fn load_session_events_range_blocking(
     Ok(events)
 }
 
-fn rendered_line_count(lines: &[DisplayLine], view_width: u16) -> usize {
-    rendered_rows_for_lines(lines, view_width).len()
+fn rendered_line_count(lines: &[DisplayLine], view_width: u16, density: UiDensity) -> usize {
+    rendered_rows_for_lines(lines, view_width, density).len()
 }
 
-fn rendered_rows_for_lines(lines: &[DisplayLine], view_width: u16) -> Vec<Line<'static>> {
+fn rendered_rows_for_lines(lines: &[DisplayLine], view_width: u16, density: UiDensity) -> Vec<Line<'static>> {
     let view_width = view_width.max(1) as usize;
     let mut rows = Vec::new();
     for line in lines {
-        for styled_line in line.to_styled_lines() {
-            append_wrapped_rows(&styled_line, view_width, &mut rows);
+        let mut rendered_line_rows = Vec::new();
+        for styled_line in line.to_styled_lines(density) {
+            append_wrapped_rows(&styled_line, view_width, &mut rendered_line_rows);
         }
+        if rendered_line_rows.is_empty() {
+            continue;
+        }
+        if density.is_comfort() && !rows.is_empty() {
+            rows.push(Line::default());
+        }
+        rows.extend(rendered_line_rows);
     }
     if rows.is_empty() {
         rows.push(Line::default());
@@ -1548,6 +1718,10 @@ fn is_clear_input_key(key: &KeyEvent) -> bool {
 
 fn is_cancel_agents_key(key: &KeyEvent) -> bool {
     key.modifiers.is_empty() && key.code == KeyCode::Esc
+}
+
+fn is_toggle_density_key(key: &KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('t' | 'T'))
 }
 
 fn is_scroll_up(key: &KeyEvent) -> bool {
@@ -1691,6 +1865,9 @@ mod tests {
         let esc = key_event(KeyCode::Esc, KeyModifiers::empty());
         assert!(is_cancel_agents_key(&esc));
         assert!(!is_exit_key(&esc));
+
+        let ctrl_t = key_event(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert!(is_toggle_density_key(&ctrl_t));
     }
 
     #[test]
@@ -1699,19 +1876,29 @@ mod tests {
             DisplayLine::System("1234567890".to_string()),
             DisplayLine::System("x".to_string()),
         ];
-        assert_eq!(rendered_line_count(&lines, 5), 3);
+        assert_eq!(rendered_line_count(&lines, 5, UiDensity::Compact), 3);
     }
 
     #[test]
     fn rendered_line_count_respects_explicit_newlines() {
         let lines = vec![DisplayLine::System("alpha\nbeta".to_string())];
-        assert_eq!(rendered_line_count(&lines, 80), 2);
+        assert_eq!(rendered_line_count(&lines, 80, UiDensity::Compact), 2);
     }
 
     #[test]
     fn rendered_line_count_handles_wide_chars() {
         let lines = vec![DisplayLine::System("你好你好".to_string())];
-        assert_eq!(rendered_line_count(&lines, 4), 2);
+        assert_eq!(rendered_line_count(&lines, 4, UiDensity::Compact), 2);
+    }
+
+    #[test]
+    fn comfort_density_inserts_spacing_between_messages() {
+        let lines = vec![
+            DisplayLine::System("first".to_string()),
+            DisplayLine::System("second".to_string()),
+        ];
+        assert_eq!(rendered_line_count(&lines, 80, UiDensity::Comfort), 3);
+        assert_eq!(rendered_line_count(&lines, 80, UiDensity::Compact), 2);
     }
 
     #[test]
@@ -1722,7 +1909,7 @@ mod tests {
             text: "alpha\n\nbeta".to_string(),
             agent_idx: 0,
         }
-        .to_styled_lines();
+        .to_styled_lines(UiDensity::Compact);
 
         assert_eq!(lines.len(), 3);
         assert!(lines[0].to_string().ends_with(": alpha"));
@@ -1737,7 +1924,10 @@ mod tests {
             DisplayLine::System("x".to_string()),
         ];
         let mut cache = RenderedLineCache::default();
-        assert_eq!(max_scroll_offset_for_view(&lines, 2, 5, &mut cache), 1);
+        assert_eq!(
+            max_scroll_offset_for_view(&lines, 2, 5, UiDensity::Compact, &mut cache),
+            1
+        );
     }
 
     #[test]
@@ -1816,7 +2006,7 @@ mod tests {
         assert_eq!(alice.state, AgentStatusState::Error);
         assert_eq!(alice.reason.as_deref(), Some("provider timeout\ndetails"));
 
-        let line = build_status_line(&statuses).to_string();
+        let line = build_status_line(&statuses, UiDensity::Comfort).to_string();
         assert!(line.contains("Agents"));
         assert!(line.contains("Alice"));
         assert!(line.contains("provider timeout"));
@@ -1840,8 +2030,9 @@ mod tests {
             },
         );
 
-        let line = build_status_line(&statuses).to_string();
+        let line = build_status_line(&statuses, UiDensity::Comfort).to_string();
         assert!(line.contains("Status running |"));
+        assert!(line.contains("View comfort"));
     }
 
     #[test]
@@ -1855,7 +2046,7 @@ mod tests {
             },
         );
 
-        let line = build_status_line(&statuses).to_string();
+        let line = build_status_line(&statuses, UiDensity::Comfort).to_string();
         assert!(line.contains("Status idle    |"));
     }
 

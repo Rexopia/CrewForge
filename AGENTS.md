@@ -95,6 +95,22 @@
   - in-flight wake tasks awaited with a short timeout, then aborted
   - MCP server stopped with graceful shutdown timeout fallback
 
+## TUI Visual Capture Workflow
+
+- For visual QA of chat TUI, use:
+  - `scripts/capture-tui-frame.sh`
+- Script prerequisites:
+  - `tmux`
+  - ImageMagick `convert`
+- Default behavior:
+  - launches `crewforge chat --dry-run --resume <latest session>`
+  - optionally runs `/demo N`
+  - optionally sends `PageUp`
+  - captures pane as `.txt`, `.ansi`, and rendered `.png`
+- Typical command:
+  - `bash scripts/capture-tui-frame.sh --demo 220 --pageup 4 --out /tmp/cf-tui-check`
+- Use the generated PNG as the primary artifact for UI/UX review, and `.ansi` for escape-sequence/debug inspection.
+
 ## Launcher Safety
 
 - `crewforge-ts/src/bin/crewforge.ts` must remain a thin process launcher.
