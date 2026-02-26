@@ -9,3 +9,6 @@
 /crewforge-rs/npm/crewforge-core-darwin-x64/crewforge
 /crewforge-rs/npm/crewforge-core-darwin-arm64/crewforge
 /crewforge-rs/npm/crewforge-core-win32-x64/crewforge.exe
+
+docs/
+vendor/

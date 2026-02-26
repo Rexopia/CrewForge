@@ -1,3 +1,5 @@
+mod agent_cmd;
+mod auth_cmd;
 mod chat;
 mod config;
 mod hub;
@@ -7,7 +9,7 @@ mod managed_opencode;
 mod mcp_server;
 mod profiles;
 mod prompt_theme;
-mod provider;
+mod opencode_provider;
 mod scheduler;
 mod text;
 mod tui;
@@ -29,6 +31,15 @@ enum Commands {
 
     /// Start chat runtime (replacement of npm run chat)
     Chat(ChatCommandArgs),
+
+    /// Manage provider OAuth and API key authentication profiles
+    Auth {
+        #[command(subcommand)]
+        auth_command: auth_cmd::AuthCommands,
+    },
+
+    /// Run an interactive agent session (native Rust provider stack)
+    Agent(agent_cmd::AgentArgs),
 }
 
 #[derive(Debug, Args)]
@@ -82,6 +93,8 @@ async fn main() {
             })
             .await
         }
+        Commands::Auth { auth_command } => auth_cmd::run(auth_command).await,
+        Commands::Agent(args) => agent_cmd::run(args).await,
     };
 
     if let Err(error) = result {

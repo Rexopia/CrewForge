@@ -23,7 +23,7 @@ use crate::managed_opencode::{self, HUB_ACK_TOOL, HUB_GET_TOOL, HUB_POST_TOOL};
 use crate::mcp_server::RoomHubMcpServer;
 use crate::profiles::{self, GlobalProfile};
 use crate::prompt_theme;
-use crate::provider::{OpencodeCliProvider, OpencodeProviderConfig};
+use crate::opencode_provider::{OpencodeCliProvider, OpencodeProviderConfig};
 use crate::scheduler::{WakeDecision, WorkerState, decide_wake, on_wake_finished};
 use crate::text::{format_time, to_single_line_error};
 use crate::tui::DisplayLine;
