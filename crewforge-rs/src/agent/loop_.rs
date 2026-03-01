@@ -279,8 +279,12 @@ impl AgentSession {
                 });
 
                 let result = execute_tool(&self.tools, call).await;
-                let success = result.success;
-                let output = result.output.clone();
+                let success = result.tool_result.success;
+                let output = if let Some(ref err) = result.tool_result.error {
+                    err.clone()
+                } else {
+                    result.tool_result.output.clone()
+                };
 
                 events.push(AgentEvent::ToolCallFinished {
                     name: call.name.clone(),
@@ -333,24 +337,29 @@ fn tool_call_signature(name: &str, arguments: &serde_json::Value) -> (String, St
 async fn execute_tool(tools: &[Box<dyn Tool>], call: &ParsedToolCall) -> ToolExecutionResult {
     let tool = tools.iter().find(|t| t.name() == call.name);
     match tool {
-        Some(t) => match t.call(call.arguments.clone()).await {
-            Ok(output) => ToolExecutionResult {
+        Some(t) => match t.execute(call.arguments.clone()).await {
+            Ok(tool_result) => ToolExecutionResult {
                 name: call.name.clone(),
-                output,
-                success: true,
+                tool_result,
                 tool_call_id: call.tool_call_id.clone(),
             },
             Err(e) => ToolExecutionResult {
                 name: call.name.clone(),
-                output: format!("Error: {e}"),
-                success: false,
+                tool_result: super::ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Error: {e}")),
+                },
                 tool_call_id: call.tool_call_id.clone(),
             },
         },
         None => ToolExecutionResult {
             name: call.name.clone(),
-            output: format!("Unknown tool: {}", call.name),
-            success: false,
+            tool_result: super::ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!("Unknown tool: {}", call.name)),
+            },
             tool_call_id: call.tool_call_id.clone(),
         },
     }
@@ -612,8 +621,12 @@ mod tests {
             fn name(&self) -> &str { "noop" }
             fn description(&self) -> &str { "no-op" }
             fn parameters(&self) -> serde_json::Value { serde_json::json!({}) }
-            async fn call(&self, _args: serde_json::Value) -> anyhow::Result<String> {
-                Ok("done".to_string())
+            async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<crate::agent::ToolResult> {
+                Ok(crate::agent::ToolResult {
+                    success: true,
+                    output: "done".to_string(),
+                    error: None,
+                })
             }
         }
 

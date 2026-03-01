@@ -78,9 +78,13 @@ impl Tool for EchoTool {
             "required": ["message"]
         })
     }
-    async fn call(&self, args: serde_json::Value) -> anyhow::Result<String> {
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<crewforge::agent::ToolResult> {
         let msg = args.get("message").and_then(|v| v.as_str()).unwrap_or("[no message]");
-        Ok(format!("Echo: {msg}"))
+        Ok(crewforge::agent::ToolResult {
+            success: true,
+            output: format!("Echo: {msg}"),
+            error: None,
+        })
     }
 }
 
@@ -93,7 +97,7 @@ impl Tool for DatetimeTool {
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({"type": "object", "properties": {}, "required": []})
     }
-    async fn call(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+    async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<crewforge::agent::ToolResult> {
         use std::time::{SystemTime, UNIX_EPOCH};
         let secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -103,7 +107,11 @@ impl Tool for DatetimeTool {
         let m = (secs / 60) % 60;
         let h = (secs / 3600) % 24;
         let days = secs / 86400;
-        Ok(format!("UTC unix_day={days} {:02}:{:02}:{:02}", h, m, s))
+        Ok(crewforge::agent::ToolResult {
+            success: true,
+            output: format!("UTC unix_day={days} {:02}:{:02}:{:02}", h, m, s),
+            error: None,
+        })
     }
 }
 

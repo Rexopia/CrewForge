@@ -12,9 +12,8 @@ pub struct ParsedToolCall {
 
 #[derive(Debug, Clone)]
 pub struct ToolExecutionResult {
+    pub tool_result: super::ToolResult,
     pub name: String,
-    pub output: String,
-    pub success: bool,
     pub tool_call_id: Option<String>,
 }
 
@@ -95,11 +94,16 @@ impl ToolDispatcher for XmlToolDispatcher {
     fn format_results(&self, results: &[ToolExecutionResult]) -> ConversationMessage {
         let mut content = String::new();
         for result in results {
-            let status = if result.success { "ok" } else { "error" };
+            let status = if result.tool_result.success { "ok" } else { "error" };
+            let output = if let Some(ref err) = result.tool_result.error {
+                err.as_str()
+            } else {
+                &result.tool_result.output
+            };
             let _ = writeln!(
                 content,
                 "<tool_result name=\"{}\" status=\"{}\">\n{}\n</tool_result>",
-                result.name, status, result.output
+                result.name, status, output
             );
         }
         ConversationMessage::Chat(ChatMessage::user(format!("[Tool results]\n{content}")))
@@ -162,12 +166,19 @@ impl ToolDispatcher for NativeToolDispatcher {
     fn format_results(&self, results: &[ToolExecutionResult]) -> ConversationMessage {
         let messages: Vec<ToolResultMessage> = results
             .iter()
-            .map(|result| ToolResultMessage {
-                tool_call_id: result
-                    .tool_call_id
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string()),
-                content: result.output.clone(),
+            .map(|result| {
+                let content = if let Some(ref err) = result.tool_result.error {
+                    format!("{}\n{}", result.tool_result.output, err)
+                } else {
+                    result.tool_result.output.clone()
+                };
+                ToolResultMessage {
+                    tool_call_id: result
+                        .tool_call_id
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    content,
+                }
             })
             .collect();
         ConversationMessage::ToolResults(messages)
@@ -222,9 +233,12 @@ mod tests {
         assert_eq!(calls[0].tool_call_id.as_deref(), Some("tc1"));
 
         let msg = dispatcher.format_results(&[ToolExecutionResult {
+            tool_result: crate::agent::ToolResult {
+                success: true,
+                output: "hello".into(),
+                error: None,
+            },
             name: "file_read".into(),
-            output: "hello".into(),
-            success: true,
             tool_call_id: Some("tc1".into()),
         }]);
         match msg {
@@ -240,9 +254,12 @@ mod tests {
     fn xml_format_results_contains_tool_result_tags() {
         let dispatcher = XmlToolDispatcher;
         let msg = dispatcher.format_results(&[ToolExecutionResult {
+            tool_result: crate::agent::ToolResult {
+                success: true,
+                output: "ok".into(),
+                error: None,
+            },
             name: "shell".into(),
-            output: "ok".into(),
-            success: true,
             tool_call_id: None,
         }]);
         let rendered = match msg {
@@ -257,9 +274,12 @@ mod tests {
     fn native_format_results_keeps_tool_call_id() {
         let dispatcher = NativeToolDispatcher;
         let msg = dispatcher.format_results(&[ToolExecutionResult {
+            tool_result: crate::agent::ToolResult {
+                success: true,
+                output: "ok".into(),
+                error: None,
+            },
             name: "shell".into(),
-            output: "ok".into(),
-            success: true,
             tool_call_id: Some("tc-1".into()),
         }]);
 
