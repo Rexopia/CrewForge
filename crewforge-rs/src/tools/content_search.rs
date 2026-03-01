@@ -471,15 +471,15 @@ fn format_line_output(
                 }
             }
             "count" => {
-                if let Some((path, count)) = parse_count_line(&relativized) {
-                    if count > 0 {
-                        file_set.insert(path.to_string());
-                        total_matches += count;
-                        lines.push(format!("{path}:{count}"));
-                        if lines.len() >= max_results {
-                            truncated = true;
-                            break;
-                        }
+                if let Some((path, count)) = parse_count_line(&relativized)
+                    && count > 0
+                {
+                    file_set.insert(path.to_string());
+                    total_matches += count;
+                    lines.push(format!("{path}:{count}"));
+                    if lines.len() >= max_results {
+                        truncated = true;
+                        break;
                     }
                 }
             }
@@ -563,7 +563,6 @@ fn truncate_utf8(input: &str, max_bytes: usize) -> &str {
 mod tests {
     use super::*;
     use crate::agent::Tool;
-    use crate::security::AutonomyLevel;
     use serde_json::json;
 
     fn test_security(workspace: std::path::PathBuf) -> Arc<SecurityPolicy> {
@@ -763,10 +762,7 @@ mod tests {
             false, // no rg
         );
         // Without multiline support in grep fallback, this should still work for basic patterns
-        let result = tool
-            .execute(json!({"pattern": "line1"}))
-            .await
-            .unwrap();
+        let result = tool.execute(json!({"pattern": "line1"})).await.unwrap();
 
         assert!(result.success);
     }

@@ -1,7 +1,7 @@
-use crate::auth::openai_oauth::extract_account_id_from_jwt;
 use crate::auth::AuthService;
-use crate::provider::traits::{ChatMessage, Provider, ProviderCapabilities};
+use crate::auth::openai_oauth::extract_account_id_from_jwt;
 use crate::provider::ProviderRuntimeOptions;
+use crate::provider::traits::{ChatMessage, Provider, ProviderCapabilities};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -198,6 +198,7 @@ fn first_nonempty(text: Option<&str>) -> Option<String> {
     })
 }
 
+#[allow(dead_code)]
 fn resolve_instructions(system_prompt: Option<&str>) -> String {
     first_nonempty(system_prompt).unwrap_or_else(|| DEFAULT_CODEX_INSTRUCTIONS.to_string())
 }
@@ -315,10 +316,10 @@ fn extract_responses_text(response: &ResponsesResponse) -> Option<String> {
 
     for item in &response.output {
         for content in &item.content {
-            if content.kind.as_deref() == Some("output_text") {
-                if let Some(text) = first_nonempty(content.text.as_deref()) {
-                    return Some(text);
-                }
+            if content.kind.as_deref() == Some("output_text")
+                && let Some(text) = first_nonempty(content.text.as_deref())
+            {
+                return Some(text);
             }
         }
     }

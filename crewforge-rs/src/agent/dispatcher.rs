@@ -1,5 +1,5 @@
-use crate::provider::traits::{ChatMessage, ChatResponse, ConversationMessage, ToolResultMessage};
 use super::Tool;
+use crate::provider::traits::{ChatMessage, ChatResponse, ConversationMessage, ToolResultMessage};
 use serde_json::Value;
 use std::fmt::Write;
 
@@ -94,7 +94,11 @@ impl ToolDispatcher for XmlToolDispatcher {
     fn format_results(&self, results: &[ToolExecutionResult]) -> ConversationMessage {
         let mut content = String::new();
         for result in results {
-            let status = if result.tool_result.success { "ok" } else { "error" };
+            let status = if result.tool_result.success {
+                "ok"
+            } else {
+                "error"
+            };
             let output = if let Some(ref err) = result.tool_result.error {
                 err.as_str()
             } else {
@@ -361,9 +365,7 @@ mod tests {
     #[test]
     fn xml_dispatcher_skips_empty_name() {
         let response = ChatResponse {
-            text: Some(
-                "<tool_call>{\"name\":\"\",\"arguments\":{}}</tool_call>text after".into(),
-            ),
+            text: Some("<tool_call>{\"name\":\"\",\"arguments\":{}}</tool_call>text after".into()),
             tool_calls: vec![],
             usage: None,
             reasoning_content: None,

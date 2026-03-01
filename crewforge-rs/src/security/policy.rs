@@ -384,9 +384,7 @@ fn is_valid_env_var_name(name: &str) -> bool {
             .chars()
             .next()
             .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Detect unquoted shell variable expansions that are not explicitly allowlisted.
@@ -786,7 +784,7 @@ impl SecurityPolicy {
                 }
 
                 if candidate.starts_with('-') {
-                    if let Some((_, value)) = candidate.split_once('=')  {
+                    if let Some((_, value)) = candidate.split_once('=') {
                         let blocked = forbidden_candidate(value);
                         if blocked.is_some() {
                             return blocked;
@@ -1220,9 +1218,10 @@ mod tests {
     #[test]
     fn validate_blocks_medium_risk_without_approval() {
         let p = test_policy();
-        assert!(p
-            .validate_command_execution("git commit -m x", false)
-            .is_err());
+        assert!(
+            p.validate_command_execution("git commit -m x", false)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1247,9 +1246,10 @@ mod tests {
             autonomy: AutonomyLevel::Full,
             ..SecurityPolicy::default()
         };
-        assert!(p
-            .validate_command_execution("git commit -m x", false)
-            .is_ok());
+        assert!(
+            p.validate_command_execution("git commit -m x", false)
+                .is_ok()
+        );
     }
 
     // ── Rate limiting tests ─────────────────────────────────────────────
@@ -1305,7 +1305,10 @@ mod tests {
             autonomy: AutonomyLevel::ReadOnly,
             ..SecurityPolicy::default()
         };
-        assert!(p.enforce_tool_operation(ToolOperation::Read, "read").is_ok());
+        assert!(
+            p.enforce_tool_operation(ToolOperation::Read, "read")
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1314,9 +1317,10 @@ mod tests {
             autonomy: AutonomyLevel::ReadOnly,
             ..SecurityPolicy::default()
         };
-        assert!(p
-            .enforce_tool_operation(ToolOperation::Act, "write")
-            .is_err());
+        assert!(
+            p.enforce_tool_operation(ToolOperation::Act, "write")
+                .is_err()
+        );
     }
 
     #[test]
@@ -1325,12 +1329,14 @@ mod tests {
             max_actions_per_hour: 1,
             ..SecurityPolicy::default()
         };
-        assert!(p
-            .enforce_tool_operation(ToolOperation::Act, "write")
-            .is_ok());
-        assert!(p
-            .enforce_tool_operation(ToolOperation::Act, "write")
-            .is_err());
+        assert!(
+            p.enforce_tool_operation(ToolOperation::Act, "write")
+                .is_ok()
+        );
+        assert!(
+            p.enforce_tool_operation(ToolOperation::Act, "write")
+                .is_err()
+        );
     }
 
     // ── Forbidden path argument tests ───────────────────────────────────
@@ -1350,9 +1356,10 @@ mod tests {
     #[test]
     fn forbidden_path_argument_option_value() {
         let p = test_policy();
-        assert!(p
-            .forbidden_path_argument("cmd --file=/etc/passwd")
-            .is_some());
+        assert!(
+            p.forbidden_path_argument("cmd --file=/etc/passwd")
+                .is_some()
+        );
     }
 
     // ── Default policy sanity ───────────────────────────────────────────
@@ -1379,10 +1386,7 @@ mod tests {
         for dir in &[
             "/etc", "/root", "/usr", "/bin", "/sbin", "/boot", "/dev", "/proc", "/sys",
         ] {
-            assert!(
-                !p.is_path_allowed(dir),
-                "{dir} should be blocked"
-            );
+            assert!(!p.is_path_allowed(dir), "{dir} should be blocked");
         }
     }
 

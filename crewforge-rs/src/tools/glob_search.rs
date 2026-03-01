@@ -165,7 +165,6 @@ impl crate::agent::Tool for GlobSearchTool {
 mod tests {
     use super::*;
     use crate::agent::Tool;
-    use crate::security::AutonomyLevel;
     use serde_json::json;
 
     fn test_security(workspace: std::path::PathBuf) -> Arc<SecurityPolicy> {
@@ -181,10 +180,7 @@ mod tests {
         std::fs::write(dir.path().join("hello.txt"), "content").unwrap();
 
         let tool = GlobSearchTool::new(test_security(dir.path().to_path_buf()));
-        let result = tool
-            .execute(json!({"pattern": "hello.txt"}))
-            .await
-            .unwrap();
+        let result = tool.execute(json!({"pattern": "hello.txt"})).await.unwrap();
 
         assert!(result.success);
         assert!(result.output.contains("hello.txt"));
@@ -215,10 +211,7 @@ mod tests {
         std::fs::write(dir.path().join("sub/deep/leaf.txt"), "").unwrap();
 
         let tool = GlobSearchTool::new(test_security(dir.path().to_path_buf()));
-        let result = tool
-            .execute(json!({"pattern": "**/*.txt"}))
-            .await
-            .unwrap();
+        let result = tool.execute(json!({"pattern": "**/*.txt"})).await.unwrap();
 
         assert!(result.success);
         assert!(result.output.contains("root.txt"));
@@ -243,10 +236,7 @@ mod tests {
     #[tokio::test]
     async fn glob_search_rejects_absolute_path() {
         let tool = GlobSearchTool::new(test_security(std::env::temp_dir()));
-        let result = tool
-            .execute(json!({"pattern": "/etc/**/*"}))
-            .await
-            .unwrap();
+        let result = tool.execute(json!({"pattern": "/etc/**/*"})).await.unwrap();
 
         assert!(!result.success);
         assert!(result.error.as_ref().unwrap().contains("Absolute paths"));
@@ -342,16 +332,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         let tool = GlobSearchTool::new(test_security(dir.path().to_path_buf()));
-        let result = tool
-            .execute(json!({"pattern": "[invalid"}))
-            .await
-            .unwrap();
+        let result = tool.execute(json!({"pattern": "[invalid"})).await.unwrap();
 
         assert!(!result.success);
-        assert!(result
-            .error
-            .as_ref()
-            .unwrap()
-            .contains("Invalid glob pattern"));
+        assert!(
+            result
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("Invalid glob pattern")
+        );
     }
 }

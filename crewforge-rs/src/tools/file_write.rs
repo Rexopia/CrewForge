@@ -114,14 +114,14 @@ impl crate::agent::Tool for FileWriteTool {
         #[cfg(unix)]
         if full_path.exists() {
             let meta = std::fs::symlink_metadata(&full_path);
-            if let Ok(m) = meta {
-                if m.file_type().is_symlink() {
-                    return Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some("Refusing to write through symlink".into()),
-                    });
-                }
+            if let Ok(m) = meta
+                && m.file_type().is_symlink()
+            {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some("Refusing to write through symlink".into()),
+                });
             }
         }
 

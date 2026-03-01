@@ -35,7 +35,7 @@ pub fn generate_pkce_state() -> PkceState {
 
 /// Generate a cryptographically random base64url-encoded string.
 pub fn random_base64url(byte_len: usize) -> String {
-    use chacha20poly1305::aead::{rand_core::RngCore, OsRng};
+    use chacha20poly1305::aead::{OsRng, rand_core::RngCore};
 
     let mut bytes = vec![0_u8; byte_len];
     OsRng.fill_bytes(&mut bytes);
@@ -66,12 +66,12 @@ pub fn url_decode(input: &str) -> String {
             b'%' if i + 2 < bytes.len() => {
                 let hi = bytes[i + 1] as char;
                 let lo = bytes[i + 2] as char;
-                if let (Some(h), Some(l)) = (hi.to_digit(16), lo.to_digit(16)) {
-                    if let Ok(value) = u8::try_from(h * 16 + l) {
-                        out.push(value);
-                        i += 3;
-                        continue;
-                    }
+                if let (Some(h), Some(l)) = (hi.to_digit(16), lo.to_digit(16))
+                    && let Ok(value) = u8::try_from(h * 16 + l)
+                {
+                    out.push(value);
+                    i += 3;
+                    continue;
                 }
                 out.push(bytes[i]);
                 i += 1;

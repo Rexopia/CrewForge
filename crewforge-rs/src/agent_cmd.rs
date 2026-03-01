@@ -20,7 +20,7 @@ use crewforge::{
     auth::{AuthService, default_state_dir},
     provider::{self, default_api_key_env},
     security::SecurityPolicy,
-    tools::{default_tools, TokioRuntime},
+    tools::{TokioRuntime, default_tools},
 };
 
 // ── Clap args ─────────────────────────────────────────────────────────────────
@@ -71,35 +71,56 @@ fn print_event(event: &AgentEvent) {
                 eprintln!("\x1b[2m[thinking... round {}]\x1b[0m", iteration + 1);
             }
         }
-        AgentEvent::LlmResponse { text, tool_call_count, usage } => {
+        AgentEvent::LlmResponse {
+            text,
+            tool_call_count,
+            usage,
+        } => {
             if *tool_call_count == 0 {
                 if let Some(t) = text {
                     println!("{t}");
                 }
-            } else if let Some(t) = text {
-                if !t.is_empty() {
-                    eprintln!("\x1b[2m[llm]: {t}\x1b[0m");
-                }
+            } else if let Some(t) = text
+                && !t.is_empty()
+            {
+                eprintln!("\x1b[2m[llm]: {t}\x1b[0m");
             }
-            if let Some(u) = usage {
-                if u.input_tokens.is_some() || u.output_tokens.is_some() {
-                    eprintln!(
-                        "\x1b[2m[tokens] in={} out={}\x1b[0m",
-                        u.input_tokens.unwrap_or(0),
-                        u.output_tokens.unwrap_or(0)
-                    );
-                }
+            if let Some(u) = usage
+                && (u.input_tokens.is_some() || u.output_tokens.is_some())
+            {
+                eprintln!(
+                    "\x1b[2m[tokens] in={} out={}\x1b[0m",
+                    u.input_tokens.unwrap_or(0),
+                    u.output_tokens.unwrap_or(0)
+                );
             }
         }
-        AgentEvent::ToolCallStarted { iteration, name, args } => {
+        AgentEvent::ToolCallStarted {
+            iteration,
+            name,
+            args,
+        } => {
             let args_str = serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string());
-            eprintln!("\x1b[33m[tool:{}] {}  {}\x1b[0m", iteration + 1, name, args_str);
+            eprintln!(
+                "\x1b[33m[tool:{}] {}  {}\x1b[0m",
+                iteration + 1,
+                name,
+                args_str
+            );
         }
-        AgentEvent::ToolCallFinished { name, result, success } => {
+        AgentEvent::ToolCallFinished {
+            name,
+            result,
+            success,
+        } => {
             let icon = if *success { "✓" } else { "✗" };
             eprintln!("\x1b[32m[{icon} {name}] {result}\x1b[0m");
         }
-        AgentEvent::TurnFinished { final_text, iterations_used, stop_reason } => {
+        AgentEvent::TurnFinished {
+            final_text,
+            iterations_used,
+            stop_reason,
+        } => {
             let reason = match stop_reason {
                 StopReason::Done => "done",
                 StopReason::MaxIterations => "max_iterations",
@@ -109,10 +130,10 @@ fn print_event(event: &AgentEvent) {
                 "\x1b[2m[turn finished: {} iteration(s), reason={}]\x1b[0m",
                 iterations_used, reason
             );
-            if *iterations_used == 0 {
-                if let Some(t) = final_text {
-                    println!("{t}");
-                }
+            if *iterations_used == 0
+                && let Some(t) = final_text
+            {
+                println!("{t}");
             }
         }
         AgentEvent::Error { message, fatal } => {
@@ -172,7 +193,11 @@ pub async fn run(args: AgentArgs) -> Result<()> {
         "\x1b[1mcrewforge agent\x1b[0m  provider={} model={} tools={}",
         args.provider,
         args.model,
-        if args.no_tools { "off".to_string() } else { tool_names.join(", ") }
+        if args.no_tools {
+            "off".to_string()
+        } else {
+            tool_names.join(", ")
+        }
     );
     eprintln!("Type your message and press Enter. Ctrl-D to exit.\n");
 

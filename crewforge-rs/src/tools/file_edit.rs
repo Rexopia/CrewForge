@@ -133,17 +133,17 @@ impl crate::agent::Tool for FileEditTool {
         let resolved_target = resolved_parent.join(file_name);
 
         // Symlink check
-        if let Ok(meta) = tokio::fs::symlink_metadata(&resolved_target).await {
-            if meta.file_type().is_symlink() {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!(
-                        "Refusing to edit through symlink: {}",
-                        resolved_target.display()
-                    )),
-                });
-            }
+        if let Ok(meta) = tokio::fs::symlink_metadata(&resolved_target).await
+            && meta.file_type().is_symlink()
+        {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!(
+                    "Refusing to edit through symlink: {}",
+                    resolved_target.display()
+                )),
+            });
         }
 
         if !self.security.record_action() {
@@ -284,11 +284,13 @@ mod tests {
             .unwrap();
 
         assert!(!result.success);
-        assert!(result
-            .error
-            .as_deref()
-            .unwrap_or("")
-            .contains("matches 2 times"));
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("matches 2 times")
+        );
     }
 
     #[tokio::test]
@@ -333,11 +335,13 @@ mod tests {
             .unwrap();
 
         assert!(!result.success);
-        assert!(result
-            .error
-            .as_deref()
-            .unwrap_or("")
-            .contains("must not be empty"));
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("must not be empty")
+        );
     }
 
     #[tokio::test]
@@ -466,10 +470,12 @@ mod tests {
             .unwrap();
 
         assert!(!result.success);
-        assert!(result
-            .error
-            .as_deref()
-            .unwrap_or("")
-            .contains("Failed to read file"));
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("Failed to read file")
+        );
     }
 }

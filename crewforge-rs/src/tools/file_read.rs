@@ -93,7 +93,10 @@ impl crate::agent::Tool for FileReadTool {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some(self.security.resolved_path_violation_message(&resolved_path)),
+                error: Some(
+                    self.security
+                        .resolved_path_violation_message(&resolved_path),
+                ),
             });
         }
 
@@ -251,10 +254,7 @@ mod tests {
     async fn file_read_blocks_absolute_path() {
         let dir = tempfile::tempdir().unwrap();
         let tool = FileReadTool::new(test_security(dir.path().to_path_buf()));
-        let result = tool
-            .execute(json!({"path": "/etc/passwd"}))
-            .await
-            .unwrap();
+        let result = tool.execute(json!({"path": "/etc/passwd"})).await.unwrap();
         assert!(!result.success);
     }
 
@@ -279,9 +279,12 @@ mod tests {
     #[tokio::test]
     async fn file_read_with_offset_and_limit() {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("multi.txt"), "line1\nline2\nline3\nline4\nline5")
-            .await
-            .unwrap();
+        tokio::fs::write(
+            dir.path().join("multi.txt"),
+            "line1\nline2\nline3\nline4\nline5",
+        )
+        .await
+        .unwrap();
 
         let tool = FileReadTool::new(test_security(dir.path().to_path_buf()));
         let result = tool
@@ -318,10 +321,7 @@ mod tests {
             .unwrap();
 
         let tool = FileReadTool::new(test_security(dir.path().to_path_buf()));
-        let result = tool
-            .execute(json!({"path": "empty.txt"}))
-            .await
-            .unwrap();
+        let result = tool.execute(json!({"path": "empty.txt"})).await.unwrap();
         assert!(result.success);
         assert!(result.output.is_empty());
     }
@@ -368,10 +368,7 @@ mod tests {
     async fn file_read_blocks_null_byte_in_path() {
         let dir = tempfile::tempdir().unwrap();
         let tool = FileReadTool::new(test_security(dir.path().to_path_buf()));
-        let result = tool
-            .execute(json!({"path": "file\0.txt"}))
-            .await
-            .unwrap();
+        let result = tool.execute(json!({"path": "file\0.txt"})).await.unwrap();
         assert!(!result.success);
     }
 
@@ -397,10 +394,7 @@ mod tests {
             .unwrap();
 
         let tool = FileReadTool::new(test_security(dir.path().to_path_buf()));
-        let result = tool
-            .execute(json!({"path": "binary.bin"}))
-            .await
-            .unwrap();
+        let result = tool.execute(json!({"path": "binary.bin"})).await.unwrap();
         assert!(result.success);
         assert!(result.output.contains("hello"));
     }

@@ -263,10 +263,12 @@ mod tests {
         assert_eq!(tool.name(), "shell");
         let schema = tool.parameters();
         assert!(schema["properties"]["command"].is_object());
-        assert!(schema["required"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("command")));
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("command"))
+        );
     }
 
     #[tokio::test]
@@ -283,10 +285,7 @@ mod tests {
     #[tokio::test]
     async fn shell_blocks_dangerous_command() {
         let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
-        let result = tool
-            .execute(json!({"command": "rm -rf /"}))
-            .await
-            .unwrap();
+        let result = tool.execute(json!({"command": "rm -rf /"})).await.unwrap();
         assert!(!result.success);
     }
 
@@ -299,10 +298,7 @@ mod tests {
             ..SecurityPolicy::default()
         });
         let tool = ShellTool::new(security, test_runtime());
-        let result = tool
-            .execute(json!({"command": "echo test"}))
-            .await
-            .unwrap();
+        let result = tool.execute(json!({"command": "echo test"})).await.unwrap();
         assert!(!result.success);
         assert!(result.error.as_deref().unwrap_or("").contains("Rate limit"));
     }
@@ -310,10 +306,7 @@ mod tests {
     #[tokio::test]
     async fn shell_blocks_readonly_mode() {
         let tool = ShellTool::new(test_security(AutonomyLevel::ReadOnly), test_runtime());
-        let result = tool
-            .execute(json!({"command": "ls"}))
-            .await
-            .unwrap();
+        let result = tool.execute(json!({"command": "ls"})).await.unwrap();
         assert!(!result.success);
         assert!(result.error.as_ref().unwrap().contains("not allowed"));
     }
@@ -326,11 +319,13 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.success);
-        assert!(result
-            .error
-            .as_deref()
-            .unwrap_or("")
-            .contains("Path blocked"));
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("Path blocked")
+        );
     }
 
     #[tokio::test]

@@ -1,14 +1,11 @@
 /// Build a basic system prompt for an agent with optional instructions.
-pub fn build_system_prompt(
-    agent_name: &str,
-    instructions: Option<&str>,
-) -> String {
+pub fn build_system_prompt(agent_name: &str, instructions: Option<&str>) -> String {
     let mut prompt = format!("You are {agent_name}, an AI assistant.");
-    if let Some(instr) = instructions {
-        if !instr.is_empty() {
-            prompt.push_str("\n\n");
-            prompt.push_str(instr);
-        }
+    if let Some(instr) = instructions
+        && !instr.is_empty()
+    {
+        prompt.push_str("\n\n");
+        prompt.push_str(instr);
     }
     prompt
 }

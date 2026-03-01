@@ -2,16 +2,15 @@
 //! Most LLM APIs follow the same `/v1/chat/completions` format.
 //! This module provides a single implementation that works for all of them.
 
+use crate::provider::traits::ToolSpec;
 use crate::provider::traits::{
     ChatMessage, ChatRequest as ProviderChatRequest, ChatResponse as ProviderChatResponse,
-    Provider, TokenUsage,
-    ToolCall as ProviderToolCall,
+    Provider, TokenUsage, ToolCall as ProviderToolCall,
 };
-use crate::provider::traits::ToolSpec;
 use async_trait::async_trait;
 use reqwest::{
-    header::{HeaderMap, HeaderValue, USER_AGENT},
     Client,
+    header::{HeaderMap, HeaderValue, USER_AGENT},
 };
 use serde::{Deserialize, Serialize};
 
@@ -149,6 +148,7 @@ impl OpenAiCompatibleProvider {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_with_options(
         name: &str,
         base_url: &str,
@@ -289,6 +289,7 @@ impl OpenAiCompatibleProvider {
         }
     }
 
+    #[allow(dead_code)]
     fn tool_specs_to_openai_format(tools: &[ToolSpec]) -> Vec<serde_json::Value> {
         tools
             .iter()
@@ -448,10 +449,10 @@ impl ToolCall {
     /// Extract function name with fallback logic for various provider formats
     fn function_name(&self) -> Option<String> {
         // Standard OpenAI format: tool_calls[].function.name
-        if let Some(ref func) = self.function {
-            if let Some(ref name) = func.name {
-                return Some(name.clone());
-            }
+        if let Some(ref func) = self.function
+            && let Some(ref name) = func.name
+        {
+            return Some(name.clone());
         }
         // Fallback: direct name field
         self.name.clone()
@@ -460,10 +461,10 @@ impl ToolCall {
     /// Extract arguments with fallback logic and type conversion
     fn function_arguments(&self) -> Option<String> {
         // Standard OpenAI format: tool_calls[].function.arguments (string)
-        if let Some(ref func) = self.function {
-            if let Some(ref args) = func.arguments {
-                return Some(args.clone());
-            }
+        if let Some(ref func) = self.function
+            && let Some(ref args) = func.arguments
+        {
+            return Some(args.clone());
         }
         // Fallback: direct arguments field
         if let Some(ref args) = self.arguments {
@@ -605,10 +606,10 @@ fn extract_responses_text(response: ResponsesResponse) -> Option<String> {
 
     for item in &response.output {
         for content in &item.content {
-            if content.kind.as_deref() == Some("output_text") {
-                if let Some(text) = first_nonempty(content.text.as_deref()) {
-                    return Some(text);
-                }
+            if content.kind.as_deref() == Some("output_text")
+                && let Some(text) = first_nonempty(content.text.as_deref())
+            {
+                return Some(text);
             }
         }
     }
@@ -705,9 +706,7 @@ impl OpenAiCompatibleProvider {
             .ok_or_else(|| anyhow::anyhow!("No response from {} Responses API", self.name))
     }
 
-    fn convert_tool_specs(
-        tools: Option<&[ToolSpec]>,
-    ) -> Option<Vec<serde_json::Value>> {
+    fn convert_tool_specs(tools: Option<&[ToolSpec]>) -> Option<Vec<serde_json::Value>> {
         tools.map(|items| {
             items
                 .iter()
@@ -725,82 +724,75 @@ impl OpenAiCompatibleProvider {
         })
     }
 
+    #[allow(dead_code)]
     fn to_message_content(_role: &str, content: &str) -> MessageContent {
         MessageContent::Text(content.to_string())
     }
 
-    fn convert_messages_for_native(
-        messages: &[ChatMessage],
-    ) -> Vec<NativeMessage> {
+    fn convert_messages_for_native(messages: &[ChatMessage]) -> Vec<NativeMessage> {
         messages
             .iter()
             .map(|message| {
-                if message.role == "assistant" {
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&message.content)
-                    {
-                        if let Some(tool_calls_value) = value.get("tool_calls") {
-                            if let Ok(parsed_calls) =
-                                serde_json::from_value::<Vec<ProviderToolCall>>(
-                                    tool_calls_value.clone(),
-                                )
-                            {
-                                let tool_calls = parsed_calls
-                                    .into_iter()
-                                    .map(|tc| ToolCall {
-                                        id: Some(tc.id),
-                                        kind: Some("function".to_string()),
-                                        function: Some(Function {
-                                            name: Some(tc.name),
-                                            arguments: Some(tc.arguments),
-                                        }),
-                                        name: None,
-                                        arguments: None,
-                                        parameters: None,
-                                    })
-                                    .collect::<Vec<_>>();
+                if message.role == "assistant"
+                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&message.content)
+                    && let Some(tool_calls_value) = value.get("tool_calls")
+                    && let Ok(parsed_calls) =
+                        serde_json::from_value::<Vec<ProviderToolCall>>(tool_calls_value.clone())
+                {
+                    let tool_calls = parsed_calls
+                        .into_iter()
+                        .map(|tc| ToolCall {
+                            id: Some(tc.id),
+                            kind: Some("function".to_string()),
+                            function: Some(Function {
+                                name: Some(tc.name),
+                                arguments: Some(tc.arguments),
+                            }),
+                            name: None,
+                            arguments: None,
+                            parameters: None,
+                        })
+                        .collect::<Vec<_>>();
 
-                                let content = value
-                                    .get("content")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(|value| MessageContent::Text(value.to_string()));
+                    let content = value
+                        .get("content")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|value| MessageContent::Text(value.to_string()));
 
-                                let reasoning_content = value
-                                    .get("reasoning_content")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(ToString::to_string);
+                    let reasoning_content = value
+                        .get("reasoning_content")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string);
 
-                                return NativeMessage {
-                                    role: "assistant".to_string(),
-                                    content,
-                                    tool_call_id: None,
-                                    tool_calls: Some(tool_calls),
-                                    reasoning_content,
-                                };
-                            }
-                        }
-                    }
+                    return NativeMessage {
+                        role: "assistant".to_string(),
+                        content,
+                        tool_call_id: None,
+                        tool_calls: Some(tool_calls),
+                        reasoning_content,
+                    };
                 }
 
-                if message.role == "tool" {
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&message.content) {
-                        let tool_call_id = value
-                            .get("tool_call_id")
-                            .and_then(serde_json::Value::as_str)
-                            .map(ToString::to_string);
-                        let content = value
-                            .get("content")
-                            .and_then(serde_json::Value::as_str)
-                            .map(|value| MessageContent::Text(value.to_string()))
-                            .or_else(|| Some(MessageContent::Text(message.content.clone())));
+                if message.role == "tool"
+                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&message.content)
+                {
+                    let tool_call_id = value
+                        .get("tool_call_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string);
+                    let content = value
+                        .get("content")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|value| MessageContent::Text(value.to_string()))
+                        .or_else(|| Some(MessageContent::Text(message.content.clone())));
 
-                        return NativeMessage {
-                            role: "tool".to_string(),
-                            content,
-                            tool_call_id,
-                            tool_calls: None,
-                            reasoning_content: None,
-                        };
-                    }
+                    return NativeMessage {
+                        role: "tool".to_string(),
+                        content,
+                        tool_call_id,
+                        tool_calls: None,
+                        reasoning_content: None,
+                    };
                 }
 
                 NativeMessage {
@@ -1063,10 +1055,7 @@ impl Provider for OpenAiCompatibleProvider {
                 // If tool_calls are present, serialize the full message as JSON
                 // so parse_tool_calls can handle the OpenAI-style format
                 if c.message.tool_calls.is_some()
-                    && c.message
-                        .tool_calls
-                        .as_ref()
-                        .map_or(false, |t| !t.is_empty())
+                    && c.message.tool_calls.as_ref().is_some_and(|t| !t.is_empty())
                 {
                     serde_json::to_string(&c.message)
                         .unwrap_or_else(|_| c.message.effective_content())
@@ -1168,10 +1157,7 @@ impl Provider for OpenAiCompatibleProvider {
                 // If tool_calls are present, serialize the full message as JSON
                 // so parse_tool_calls can handle the OpenAI-style format
                 if c.message.tool_calls.is_some()
-                    && c.message
-                        .tool_calls
-                        .as_ref()
-                        .map_or(false, |t| !t.is_empty())
+                    && c.message.tool_calls.as_ref().is_some_and(|t| !t.is_empty())
                 {
                     serde_json::to_string(&c.message)
                         .unwrap_or_else(|_| c.message.effective_content())
@@ -1313,9 +1299,7 @@ impl Provider for OpenAiCompatibleProvider {
         };
         let native_request = NativeChatRequest {
             model: model.to_string(),
-            messages: Self::convert_messages_for_native(
-                &effective_messages,
-            ),
+            messages: Self::convert_messages_for_native(&effective_messages),
             temperature,
             stream: Some(false),
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
@@ -1471,10 +1455,12 @@ mod tests {
             .chat_with_system(None, "hello", "llama-3.3-70b", 0.7)
             .await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Venice API key not set"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Venice API key not set")
+        );
     }
 
     #[test]
@@ -1654,9 +1640,10 @@ mod tests {
             .await
             .expect_err("system-only fallback payload should fail");
 
-        assert!(err
-            .to_string()
-            .contains("requires at least one non-system message"));
+        assert!(
+            err.to_string()
+                .contains("requires at least one non-system message")
+        );
     }
 
     #[test]
@@ -1967,7 +1954,10 @@ mod tests {
             OpenAiCompatibleProvider::with_prompt_guided_tool_instructions(&input, Some(&tools));
         assert!(!output.is_empty());
         assert_eq!(output[0].role, "system");
-        assert!(output[0].content.contains("Available Tools") || output[0].content.contains("Tool Use Protocol"));
+        assert!(
+            output[0].content.contains("Available Tools")
+                || output[0].content.contains("Tool Use Protocol")
+        );
         assert!(output[0].content.contains("shell_exec"));
     }
 
@@ -2129,10 +2119,12 @@ mod tests {
 
         let result = p.chat_with_tools(&messages, &tools, "model", 0.7).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("TestProvider API key not set"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("TestProvider API key not set")
+        );
     }
 
     #[test]
