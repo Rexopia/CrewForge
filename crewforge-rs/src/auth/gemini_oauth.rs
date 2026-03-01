@@ -21,7 +21,7 @@ use tokio::net::TcpListener;
 
 // Re-export for external use
 #[allow(unused_imports)]
-pub use crate::auth::oauth_common::{generate_pkce_state, PkceState};
+pub use crate::auth::oauth_common::{PkceState, generate_pkce_state};
 
 /// Get Gemini OAuth client ID from environment.
 /// Required: set GEMINI_OAUTH_CLIENT_ID environment variable.
@@ -478,12 +478,11 @@ pub fn parse_code_from_redirect(input: &str, expected_state: Option<&str>) -> Re
     let params = parse_query_params(query);
 
     if let Some(code) = params.get("code") {
-        if let Some(expected) = expected_state {
-            if let Some(actual) = params.get("state") {
-                if actual != expected {
-                    anyhow::bail!("OAuth state mismatch: expected {expected}, got {actual}");
-                }
-            }
+        if let Some(expected) = expected_state
+            && let Some(actual) = params.get("state")
+            && actual != expected
+        {
+            anyhow::bail!("OAuth state mismatch: expected {expected}, got {actual}");
         }
         return Ok(code.clone());
     }

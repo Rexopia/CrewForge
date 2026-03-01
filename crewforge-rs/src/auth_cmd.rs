@@ -1,11 +1,11 @@
 //! `crewforge auth` subcommand — OAuth login, token management, and profile listing.
 
-use crewforge::auth::{self, AuthService, default_state_dir, normalize_provider};
-use crewforge::auth::oauth_common::PkceState;
-use crewforge::security::SecretStore;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use clap::Subcommand;
+use crewforge::auth::oauth_common::PkceState;
+use crewforge::auth::{self, AuthService, default_state_dir, normalize_provider};
+use crewforge::security::SecretStore;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -341,9 +341,7 @@ async fn run_login(provider: String, profile: String, device_code: bool) -> Resu
     match provider.as_str() {
         "gemini" => run_gemini_login(&svc, &client, &profile, device_code).await,
         "openai-codex" => run_openai_login(&svc, &client, &profile, device_code).await,
-        _ => bail!(
-            "`auth login` supports --provider openai-codex or gemini, got: {provider}"
-        ),
+        _ => bail!("`auth login` supports --provider openai-codex or gemini, got: {provider}"),
     }
 }
 
@@ -407,15 +405,12 @@ async fn run_gemini_login(
         }
         Err(e) => {
             println!("Callback capture failed: {e}");
-            println!(
-                "Run `crewforge auth paste-redirect --provider gemini --profile {profile}`"
-            );
+            println!("Run `crewforge auth paste-redirect --provider gemini --profile {profile}`");
             return Ok(());
         }
     };
 
-    let token_set =
-        auth::gemini_oauth::exchange_code_for_tokens(client, &code, &pkce).await?;
+    let token_set = auth::gemini_oauth::exchange_code_for_tokens(client, &code, &pkce).await?;
     let account_id = token_set
         .id_token
         .as_deref()
@@ -456,9 +451,7 @@ async fn run_openai_login(
                 return Ok(());
             }
             Err(e) => {
-                println!(
-                    "Device-code flow unavailable: {e}. Falling back to browser/paste flow."
-                );
+                println!("Device-code flow unavailable: {e}. Falling back to browser/paste flow.");
             }
         }
     }
@@ -494,8 +487,7 @@ async fn run_openai_login(
         }
     };
 
-    let token_set =
-        auth::openai_oauth::exchange_code_for_tokens(client, &code, &pkce).await?;
+    let token_set = auth::openai_oauth::exchange_code_for_tokens(client, &code, &pkce).await?;
     let account_id = extract_openai_account_id(&token_set.access_token);
     svc.store_openai_tokens(profile, token_set, account_id, true)
         .await?;
@@ -613,10 +605,12 @@ async fn run_paste_token(
     if token.is_empty() {
         bail!("Token cannot be empty");
     }
-    let kind =
-        auth::anthropic_token::detect_auth_kind(&token, auth_kind.as_deref());
+    let kind = auth::anthropic_token::detect_auth_kind(&token, auth_kind.as_deref());
     let mut metadata = std::collections::HashMap::new();
-    metadata.insert("auth_kind".to_string(), kind.as_metadata_value().to_string());
+    metadata.insert(
+        "auth_kind".to_string(),
+        kind.as_metadata_value().to_string(),
+    );
 
     let svc = make_auth_service();
     svc.store_provider_token(&provider, &profile, &token, metadata, true)
@@ -638,9 +632,7 @@ async fn run_refresh(provider: String, profile: Option<String>) -> Result<()> {
                 .get_valid_openai_access_token(profile.as_deref())
                 .await?
             {
-                Some(_) => println!(
-                    "OpenAI Codex token is valid (refresh completed if needed)."
-                ),
+                Some(_) => println!("OpenAI Codex token is valid (refresh completed if needed)."),
                 None => bail!(
                     "No OpenAI Codex auth profile found. \
                      Run `crewforge auth login --provider openai-codex`."

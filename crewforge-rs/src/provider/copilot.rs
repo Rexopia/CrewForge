@@ -252,58 +252,55 @@ impl CopilotProvider {
         messages
             .iter()
             .map(|message| {
-                if message.role == "assistant" {
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&message.content) {
-                        if let Some(tool_calls_value) = value.get("tool_calls") {
-                            if let Ok(parsed_calls) =
-                                serde_json::from_value::<Vec<ProviderToolCall>>(tool_calls_value.clone())
-                            {
-                                let tool_calls = parsed_calls
-                                    .into_iter()
-                                    .map(|tool_call| NativeToolCall {
-                                        id: Some(tool_call.id),
-                                        kind: Some("function".to_string()),
-                                        function: NativeFunctionCall {
-                                            name: tool_call.name,
-                                            arguments: tool_call.arguments,
-                                        },
-                                    })
-                                    .collect::<Vec<_>>();
+                if message.role == "assistant"
+                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&message.content)
+                    && let Some(tool_calls_value) = value.get("tool_calls")
+                    && let Ok(parsed_calls) =
+                        serde_json::from_value::<Vec<ProviderToolCall>>(tool_calls_value.clone())
+                {
+                    let tool_calls = parsed_calls
+                        .into_iter()
+                        .map(|tool_call| NativeToolCall {
+                            id: Some(tool_call.id),
+                            kind: Some("function".to_string()),
+                            function: NativeFunctionCall {
+                                name: tool_call.name,
+                                arguments: tool_call.arguments,
+                            },
+                        })
+                        .collect::<Vec<_>>();
 
-                                let content = value
-                                    .get("content")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(ToString::to_string);
+                    let content = value
+                        .get("content")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string);
 
-                                return ApiMessage {
-                                    role: "assistant".to_string(),
-                                    content,
-                                    tool_call_id: None,
-                                    tool_calls: Some(tool_calls),
-                                };
-                            }
-                        }
-                    }
+                    return ApiMessage {
+                        role: "assistant".to_string(),
+                        content,
+                        tool_call_id: None,
+                        tool_calls: Some(tool_calls),
+                    };
                 }
 
-                if message.role == "tool" {
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&message.content) {
-                        let tool_call_id = value
-                            .get("tool_call_id")
-                            .and_then(serde_json::Value::as_str)
-                            .map(ToString::to_string);
-                        let content = value
-                            .get("content")
-                            .and_then(serde_json::Value::as_str)
-                            .map(ToString::to_string);
+                if message.role == "tool"
+                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&message.content)
+                {
+                    let tool_call_id = value
+                        .get("tool_call_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string);
+                    let content = value
+                        .get("content")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string);
 
-                        return ApiMessage {
-                            role: "tool".to_string(),
-                            content,
-                            tool_call_id,
-                            tool_calls: None,
-                        };
-                    }
+                    return ApiMessage {
+                        role: "tool".to_string(),
+                        content,
+                        tool_call_id,
+                        tool_calls: None,
+                    };
                 }
 
                 ApiMessage {
@@ -390,28 +387,28 @@ impl CopilotProvider {
     async fn get_api_key(&self) -> anyhow::Result<(String, String)> {
         let mut cached = self.refresh_lock.lock().await;
 
-        if let Some(cached_key) = cached.as_ref() {
-            if chrono::Utc::now().timestamp() + 120 < cached_key.expires_at {
-                return Ok((cached_key.token.clone(), cached_key.api_endpoint.clone()));
-            }
+        if let Some(cached_key) = cached.as_ref()
+            && chrono::Utc::now().timestamp() + 120 < cached_key.expires_at
+        {
+            return Ok((cached_key.token.clone(), cached_key.api_endpoint.clone()));
         }
 
-        if let Some(info) = self.load_api_key_from_disk().await {
-            if chrono::Utc::now().timestamp() + 120 < info.expires_at {
-                let endpoint = info
-                    .endpoints
-                    .as_ref()
-                    .and_then(|e| e.api.clone())
-                    .unwrap_or_else(|| DEFAULT_API.to_string());
-                let token = info.token;
+        if let Some(info) = self.load_api_key_from_disk().await
+            && chrono::Utc::now().timestamp() + 120 < info.expires_at
+        {
+            let endpoint = info
+                .endpoints
+                .as_ref()
+                .and_then(|e| e.api.clone())
+                .unwrap_or_else(|| DEFAULT_API.to_string());
+            let token = info.token;
 
-                *cached = Some(CachedApiKey {
-                    token: token.clone(),
-                    api_endpoint: endpoint.clone(),
-                    expires_at: info.expires_at,
-                });
-                return Ok((token, endpoint));
-            }
+            *cached = Some(CachedApiKey {
+                token: token.clone(),
+                api_endpoint: endpoint.clone(),
+                expires_at: info.expires_at,
+            });
+            return Ok((token, endpoint));
         }
 
         let access_token = self.get_github_access_token().await?;
@@ -702,12 +699,16 @@ mod tests {
     #[test]
     fn copilot_headers_include_required_fields() {
         let headers = CopilotProvider::COPILOT_HEADERS;
-        assert!(headers
-            .iter()
-            .any(|(header, _)| *header == "Editor-Version"));
-        assert!(headers
-            .iter()
-            .any(|(header, _)| *header == "Editor-Plugin-Version"));
+        assert!(
+            headers
+                .iter()
+                .any(|(header, _)| *header == "Editor-Version")
+        );
+        assert!(
+            headers
+                .iter()
+                .any(|(header, _)| *header == "Editor-Plugin-Version")
+        );
         assert!(headers.iter().any(|(header, _)| *header == "User-Agent"));
     }
 

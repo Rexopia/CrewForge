@@ -1,6 +1,4 @@
-use crate::provider::traits::{
-    ChatMessage, ConversationMessage, Provider, ToolResultMessage,
-};
+use crate::provider::traits::{ChatMessage, ConversationMessage, Provider};
 use anyhow::Result;
 use std::fmt::Write;
 
@@ -110,7 +108,9 @@ fn build_compaction_transcript(messages: &[ConversationMessage]) -> String {
                 let role = chat.role.to_uppercase();
                 let _ = writeln!(transcript, "{role}: {}", chat.content.trim());
             }
-            ConversationMessage::AssistantToolCalls { text, tool_calls, .. } => {
+            ConversationMessage::AssistantToolCalls {
+                text, tool_calls, ..
+            } => {
                 let text_str = text.as_deref().unwrap_or("").trim();
                 let _ = writeln!(transcript, "ASSISTANT: {text_str}");
                 for tc in tool_calls {
@@ -258,12 +258,10 @@ mod tests {
 
     #[test]
     fn to_provider_messages_native_tool_results() {
-        let history = vec![ConversationMessage::ToolResults(vec![
-            ToolResultMessage {
-                tool_call_id: "tc1".into(),
-                content: "output".into(),
-            },
-        ])];
+        let history = vec![ConversationMessage::ToolResults(vec![ToolResultMessage {
+            tool_call_id: "tc1".into(),
+            content: "output".into(),
+        }])];
         let msgs = to_provider_messages_native(&history);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].role, "tool");
@@ -291,12 +289,10 @@ mod tests {
 
     #[test]
     fn to_provider_messages_xml_tool_results_as_user() {
-        let history = vec![ConversationMessage::ToolResults(vec![
-            ToolResultMessage {
-                tool_call_id: "tc1".into(),
-                content: "result_data".into(),
-            },
-        ])];
+        let history = vec![ConversationMessage::ToolResults(vec![ToolResultMessage {
+            tool_call_id: "tc1".into(),
+            content: "result_data".into(),
+        }])];
         let msgs = to_provider_messages_xml(&history);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].role, "user");
@@ -318,9 +314,7 @@ mod tests {
         // system + 3 most recent non-system
         assert_eq!(history.len(), 4);
         // system is still first
-        assert!(
-            matches!(&history[0], ConversationMessage::Chat(m) if m.role == "system")
-        );
+        assert!(matches!(&history[0], ConversationMessage::Chat(m) if m.role == "system"));
         // most recent messages are preserved
         assert!(
             matches!(&history[history.len()-1], ConversationMessage::Chat(m) if m.content == "msg3")

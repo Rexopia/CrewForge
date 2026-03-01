@@ -14,12 +14,13 @@ use std::io::{self, BufRead, Write};
 use std::sync::Arc;
 
 use anyhow::Result;
-use async_trait::async_trait;
 use clap::Args;
 use crewforge::{
     agent::{AgentEvent, AgentSession, AgentSessionConfig, StopReason, Tool},
     auth::{AuthService, default_state_dir},
     provider::{self, default_api_key_env},
+    security::SecurityPolicy,
+    tools::{TokioRuntime, default_tools},
 };
 
 // ── Clap args ─────────────────────────────────────────────────────────────────
@@ -59,54 +60,6 @@ pub struct AgentArgs {
     temperature: f64,
 }
 
-// ── Built-in test tools ───────────────────────────────────────────────────────
-
-struct EchoTool;
-
-#[async_trait]
-impl Tool for EchoTool {
-    fn name(&self) -> &str { "echo" }
-    fn description(&self) -> &str {
-        "Echo back the provided message. Useful for verifying that tool calling works end-to-end."
-    }
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "message": {"type": "string", "description": "The message to echo back"}
-            },
-            "required": ["message"]
-        })
-    }
-    async fn call(&self, args: serde_json::Value) -> anyhow::Result<String> {
-        let msg = args.get("message").and_then(|v| v.as_str()).unwrap_or("[no message]");
-        Ok(format!("Echo: {msg}"))
-    }
-}
-
-struct DatetimeTool;
-
-#[async_trait]
-impl Tool for DatetimeTool {
-    fn name(&self) -> &str { "get_datetime" }
-    fn description(&self) -> &str { "Get the current UTC date and time." }
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({"type": "object", "properties": {}, "required": []})
-    }
-    async fn call(&self, _args: serde_json::Value) -> anyhow::Result<String> {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let s = secs % 60;
-        let m = (secs / 60) % 60;
-        let h = (secs / 3600) % 24;
-        let days = secs / 86400;
-        Ok(format!("UTC unix_day={days} {:02}:{:02}:{:02}", h, m, s))
-    }
-}
-
 // ── Event rendering ───────────────────────────────────────────────────────────
 
 fn print_event(event: &AgentEvent) {
@@ -118,35 +71,56 @@ fn print_event(event: &AgentEvent) {
                 eprintln!("\x1b[2m[thinking... round {}]\x1b[0m", iteration + 1);
             }
         }
-        AgentEvent::LlmResponse { text, tool_call_count, usage } => {
+        AgentEvent::LlmResponse {
+            text,
+            tool_call_count,
+            usage,
+        } => {
             if *tool_call_count == 0 {
                 if let Some(t) = text {
                     println!("{t}");
                 }
-            } else if let Some(t) = text {
-                if !t.is_empty() {
-                    eprintln!("\x1b[2m[llm]: {t}\x1b[0m");
-                }
+            } else if let Some(t) = text
+                && !t.is_empty()
+            {
+                eprintln!("\x1b[2m[llm]: {t}\x1b[0m");
             }
-            if let Some(u) = usage {
-                if u.input_tokens.is_some() || u.output_tokens.is_some() {
-                    eprintln!(
-                        "\x1b[2m[tokens] in={} out={}\x1b[0m",
-                        u.input_tokens.unwrap_or(0),
-                        u.output_tokens.unwrap_or(0)
-                    );
-                }
+            if let Some(u) = usage
+                && (u.input_tokens.is_some() || u.output_tokens.is_some())
+            {
+                eprintln!(
+                    "\x1b[2m[tokens] in={} out={}\x1b[0m",
+                    u.input_tokens.unwrap_or(0),
+                    u.output_tokens.unwrap_or(0)
+                );
             }
         }
-        AgentEvent::ToolCallStarted { iteration, name, args } => {
+        AgentEvent::ToolCallStarted {
+            iteration,
+            name,
+            args,
+        } => {
             let args_str = serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string());
-            eprintln!("\x1b[33m[tool:{}] {}  {}\x1b[0m", iteration + 1, name, args_str);
+            eprintln!(
+                "\x1b[33m[tool:{}] {}  {}\x1b[0m",
+                iteration + 1,
+                name,
+                args_str
+            );
         }
-        AgentEvent::ToolCallFinished { name, result, success } => {
+        AgentEvent::ToolCallFinished {
+            name,
+            result,
+            success,
+        } => {
             let icon = if *success { "✓" } else { "✗" };
             eprintln!("\x1b[32m[{icon} {name}] {result}\x1b[0m");
         }
-        AgentEvent::TurnFinished { final_text, iterations_used, stop_reason } => {
+        AgentEvent::TurnFinished {
+            final_text,
+            iterations_used,
+            stop_reason,
+        } => {
             let reason = match stop_reason {
                 StopReason::Done => "done",
                 StopReason::MaxIterations => "max_iterations",
@@ -156,10 +130,10 @@ fn print_event(event: &AgentEvent) {
                 "\x1b[2m[turn finished: {} iteration(s), reason={}]\x1b[0m",
                 iterations_used, reason
             );
-            if *iterations_used == 0 {
-                if let Some(t) = final_text {
-                    println!("{t}");
-                }
+            if *iterations_used == 0
+                && let Some(t) = final_text
+            {
+                println!("{t}");
             }
         }
         AgentEvent::Error { message, fatal } => {
@@ -197,7 +171,13 @@ pub async fn run(args: AgentArgs) -> Result<()> {
     let tools: Vec<Box<dyn Tool>> = if args.no_tools {
         vec![]
     } else {
-        vec![Box::new(EchoTool), Box::new(DatetimeTool)]
+        let workspace = std::env::current_dir().unwrap_or_else(|_| ".".into());
+        let security = Arc::new(SecurityPolicy {
+            workspace_dir: workspace,
+            ..SecurityPolicy::default()
+        });
+        let runtime = Arc::new(TokioRuntime);
+        default_tools(security, runtime)
     };
 
     let config = AgentSessionConfig {
@@ -206,17 +186,19 @@ pub async fn run(args: AgentArgs) -> Result<()> {
         ..Default::default()
     };
 
+    let tool_names: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
     let mut session = AgentSession::new(provider, &args.model, &args.system, tools, config);
 
     eprintln!(
         "\x1b[1mcrewforge agent\x1b[0m  provider={} model={} tools={}",
         args.provider,
         args.model,
-        if args.no_tools { "off" } else { "echo,get_datetime" }
+        if args.no_tools {
+            "off".to_string()
+        } else {
+            tool_names.join(", ")
+        }
     );
-    if !args.no_tools {
-        eprintln!("tools: echo(message), get_datetime()");
-    }
     eprintln!("Type your message and press Enter. Ctrl-D to exit.\n");
 
     let stdin = io::stdin();

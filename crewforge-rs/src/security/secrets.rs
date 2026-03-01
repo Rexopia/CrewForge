@@ -27,6 +27,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Length of the random encryption key in bytes (256-bit, matches `ChaCha20`).
+#[allow(dead_code)]
 const KEY_LEN: usize = 32;
 
 /// ChaCha20-Poly1305 nonce length in bytes.
@@ -254,6 +255,7 @@ fn hex_encode(data: &[u8]) -> String {
 
 /// Build the `/grant` argument for `icacls` using a normalized username.
 /// Returns `None` when the username is empty or whitespace-only.
+#[allow(dead_code)]
 fn build_windows_icacls_grant_arg(username: &str) -> Option<String> {
     let normalized = username.trim();
     if normalized.is_empty() {

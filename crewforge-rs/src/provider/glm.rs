@@ -53,8 +53,16 @@ fn base64url_encode_bytes(data: &[u8]) -> String {
     let mut i = 0;
     while i < data.len() {
         let b0 = data[i] as u32;
-        let b1 = if i + 1 < data.len() { data[i + 1] as u32 } else { 0 };
-        let b2 = if i + 2 < data.len() { data[i + 2] as u32 } else { 0 };
+        let b1 = if i + 1 < data.len() {
+            data[i + 1] as u32
+        } else {
+            0
+        };
+        let b2 = if i + 2 < data.len() {
+            data[i + 2] as u32
+        } else {
+            0
+        };
         let triple = (b0 << 16) | (b1 << 8) | b2;
 
         result.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
@@ -101,17 +109,14 @@ impl GlmProvider {
             );
         }
 
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)?
-            .as_millis() as u64;
+        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
 
         // Check cache (valid for 3 minutes, token expires at 3.5 min)
-        if let Ok(cache) = self.token_cache.lock() {
-            if let Some((ref token, expiry)) = *cache {
-                if now_ms < expiry {
-                    return Ok(token.clone());
-                }
-            }
+        if let Ok(cache) = self.token_cache.lock()
+            && let Some((ref token, expiry)) = *cache
+            && now_ms < expiry
+        {
+            return Ok(token.clone());
         }
 
         let exp_ms = now_ms + 210_000; // 3.5 minutes

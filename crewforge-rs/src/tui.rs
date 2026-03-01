@@ -338,7 +338,9 @@ fn prefixed_message_lines(
         if density.is_comfort() {
             spans.push(Span::styled(
                 "  ",
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
             ));
         }
         spans.push(Span::raw(line));
@@ -415,7 +417,10 @@ fn agent_status_symbol(state: AgentStatusState) -> &'static str {
     }
 }
 
-fn build_status_line(statuses: &BTreeMap<String, AgentStatusEntry>, density: UiDensity) -> Line<'static> {
+fn build_status_line(
+    statuses: &BTreeMap<String, AgentStatusEntry>,
+    density: UiDensity,
+) -> Line<'static> {
     let has_running = statuses
         .values()
         .any(|entry| matches!(entry.state, AgentStatusState::Active));
@@ -430,7 +435,9 @@ fn build_status_line(statuses: &BTreeMap<String, AgentStatusEntry>, density: UiD
     let density_style = if density.is_comfort() {
         Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM)
     } else {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::DIM)
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::DIM)
     };
 
     let mut spans = vec![
@@ -596,7 +603,11 @@ impl RenderedLineCache {
 
     fn ensure_rows(&mut self, lines: &[DisplayLine], view_width: u16, density: UiDensity) {
         let view_width = view_width.max(1);
-        if !self.valid || self.width != view_width || self.len != lines.len() || self.density != density {
+        if !self.valid
+            || self.width != view_width
+            || self.len != lines.len()
+            || self.density != density
+        {
             self.rows = rendered_rows_for_lines(lines, view_width, density);
             self.width = view_width;
             self.len = lines.len();
@@ -1074,8 +1085,8 @@ pub async fn run_tui_loop(
             }, if pending_prefetch.is_some() => {
                 let (start, join) = prefetch_join;
                 let events = join.context("failed joining history prefetch task")??;
-                if history_pager.next_older_start() == Some(start) {
-                    if apply_loaded_history_events(
+                if history_pager.next_older_start() == Some(start)
+                    && apply_loaded_history_events(
                         start,
                         events,
                         &mut history_pager,
@@ -1088,7 +1099,6 @@ pub async fn run_tui_loop(
                     ) {
                         mark_render_dirty(&mut render_dirty, &mut render_pending_since);
                     }
-                }
             }
             maybe_line = msg_rx.recv() => {
                 match maybe_line {
@@ -1359,6 +1369,7 @@ fn maybe_start_history_prefetch(
     *pending_prefetch = Some(HistoryPrefetch { start, task });
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn prepend_next_older_page(
     history_pager: &mut SessionHistoryPager,
     runtime: &ChatRuntime,
@@ -1407,6 +1418,7 @@ async fn prepend_next_older_page(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_loaded_history_events(
     start: usize,
     events: Vec<MessageEvent>,
@@ -1444,7 +1456,8 @@ fn prepend_history_lines(
     if older_lines.is_empty() {
         return false;
     }
-    let added_rows = rendered_line_count(&older_lines, view_width, density).min(u16::MAX as usize) as u16;
+    let added_rows =
+        rendered_line_count(&older_lines, view_width, density).min(u16::MAX as usize) as u16;
     display_lines.splice(0..0, older_lines);
     rendered_line_cache.invalidate();
     *scroll_offset = scroll_offset.saturating_add(added_rows);
@@ -1602,7 +1615,11 @@ fn rendered_line_count(lines: &[DisplayLine], view_width: u16, density: UiDensit
     rendered_rows_for_lines(lines, view_width, density).len()
 }
 
-fn rendered_rows_for_lines(lines: &[DisplayLine], view_width: u16, density: UiDensity) -> Vec<Line<'static>> {
+fn rendered_rows_for_lines(
+    lines: &[DisplayLine],
+    view_width: u16,
+    density: UiDensity,
+) -> Vec<Line<'static>> {
     let view_width = view_width.max(1) as usize;
     let mut rows = Vec::new();
     for line in lines {

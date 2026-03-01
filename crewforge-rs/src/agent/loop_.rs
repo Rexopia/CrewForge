@@ -5,9 +5,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::provider::traits::{
-    ChatMessage, ChatRequest, ConversationMessage, Provider, ToolCall, ToolSpec,
-};
 use super::Tool;
 use super::dispatcher::{
     NativeToolDispatcher, ParsedToolCall, ToolDispatcher, ToolExecutionResult, XmlToolDispatcher,
@@ -15,12 +12,17 @@ use super::dispatcher::{
 use super::history::{
     auto_compact_history, to_provider_messages_native, to_provider_messages_xml, trim_history,
 };
+use crate::provider::traits::{
+    ChatMessage, ChatRequest, ConversationMessage, Provider, ToolCall, ToolSpec,
+};
 
 // ── Public event/config/stop types ───────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
-    LlmThinking { iteration: usize },
+    LlmThinking {
+        iteration: usize,
+    },
     LlmResponse {
         text: Option<String>,
         tool_call_count: usize,
@@ -93,7 +95,9 @@ impl AgentSession {
         let system_prompt = system_prompt.into();
         let mut history = Vec::new();
         if !system_prompt.is_empty() {
-            history.push(ConversationMessage::Chat(ChatMessage::system(system_prompt)));
+            history.push(ConversationMessage::Chat(ChatMessage::system(
+                system_prompt,
+            )));
         }
         Self {
             provider,
@@ -126,7 +130,9 @@ impl AgentSession {
 
         // Add initial user message to history.
         self.history
-            .push(ConversationMessage::Chat(ChatMessage::user(initial_message)));
+            .push(ConversationMessage::Chat(ChatMessage::user(
+                initial_message,
+            )));
 
         // Compact and trim history before starting.
         let _ = auto_compact_history(
@@ -144,7 +150,7 @@ impl AgentSession {
         let mut final_text: Option<String> = None;
         let mut iterations_used = 0;
 
-        'outer: for iteration in 0..self.config.max_iterations {
+        for iteration in 0..self.config.max_iterations {
             if self.cancelled.load(Ordering::SeqCst) {
                 events.push(AgentEvent::TurnFinished {
                     final_text,
@@ -221,7 +227,9 @@ impl AgentSession {
             if parsed_calls.is_empty() {
                 // No tool calls — this is the final response for this turn.
                 self.history
-                    .push(ConversationMessage::Chat(ChatMessage::assistant(text.clone())));
+                    .push(ConversationMessage::Chat(ChatMessage::assistant(
+                        text.clone(),
+                    )));
                 final_text = Some(text);
                 events.push(AgentEvent::TurnFinished {
                     final_text: final_text.clone(),
@@ -245,7 +253,11 @@ impl AgentSession {
                     .collect()
             };
             self.history.push(ConversationMessage::AssistantToolCalls {
-                text: if text.is_empty() { None } else { Some(text.clone()) },
+                text: if text.is_empty() {
+                    None
+                } else {
+                    Some(text.clone())
+                },
                 tool_calls: tool_calls_for_history,
                 reasoning_content: response.reasoning_content.clone(),
             });
@@ -279,8 +291,12 @@ impl AgentSession {
                 });
 
                 let result = execute_tool(&self.tools, call).await;
-                let success = result.success;
-                let output = result.output.clone();
+                let success = result.tool_result.success;
+                let output = if let Some(ref err) = result.tool_result.error {
+                    err.clone()
+                } else {
+                    result.tool_result.output.clone()
+                };
 
                 events.push(AgentEvent::ToolCallFinished {
                     name: call.name.clone(),
@@ -308,7 +324,6 @@ impl AgentSession {
                 });
                 return events;
             }
-
         }
 
         // Max iterations reached.
@@ -333,24 +348,29 @@ fn tool_call_signature(name: &str, arguments: &serde_json::Value) -> (String, St
 async fn execute_tool(tools: &[Box<dyn Tool>], call: &ParsedToolCall) -> ToolExecutionResult {
     let tool = tools.iter().find(|t| t.name() == call.name);
     match tool {
-        Some(t) => match t.call(call.arguments.clone()).await {
-            Ok(output) => ToolExecutionResult {
+        Some(t) => match t.execute(call.arguments.clone()).await {
+            Ok(tool_result) => ToolExecutionResult {
                 name: call.name.clone(),
-                output,
-                success: true,
+                tool_result,
                 tool_call_id: call.tool_call_id.clone(),
             },
             Err(e) => ToolExecutionResult {
                 name: call.name.clone(),
-                output: format!("Error: {e}"),
-                success: false,
+                tool_result: super::ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Error: {e}")),
+                },
                 tool_call_id: call.tool_call_id.clone(),
             },
         },
         None => ToolExecutionResult {
             name: call.name.clone(),
-            output: format!("Unknown tool: {}", call.name),
-            success: false,
+            tool_result: super::ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!("Unknown tool: {}", call.name)),
+            },
             tool_call_id: call.tool_call_id.clone(),
         },
     }
@@ -361,8 +381,8 @@ async fn execute_tool(tools: &[Box<dyn Tool>], call: &ParsedToolCall) -> ToolExe
 /// Matches patterns such as `token=...`, `api_key: "..."`, `password=...`, etc.
 /// Preserves the first 4 characters of each value for context; redacts the rest.
 pub fn scrub_credentials(input: &str) -> String {
-    use std::sync::LazyLock;
     use regex::Regex;
+    use std::sync::LazyLock;
 
     // Matches key=value and key: value forms (token=, api_key:, bearer:, etc.)
     static SENSITIVE_KV_REGEX: LazyLock<Regex> = LazyLock::new(|| {
@@ -518,7 +538,11 @@ mod tests {
         )));
 
         // Should have LlmThinking at start.
-        assert!(events.iter().any(|e| matches!(e, AgentEvent::LlmThinking { iteration: 0 })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::LlmThinking { iteration: 0 }))
+        );
 
         // History should include system, user, and assistant messages.
         assert!(session.history.len() >= 3);
@@ -562,14 +586,16 @@ mod tests {
         // First turn is consumed (provider called once before cancel check kicks in
         // inside the loop), OR cancelled before LLM call — depends on loop ordering.
         // Either way we must have a TurnFinished with Cancelled or Done.
-        let finished = events.iter().find(|e| matches!(e, AgentEvent::TurnFinished { .. }));
+        let finished = events
+            .iter()
+            .find(|e| matches!(e, AgentEvent::TurnFinished { .. }));
         assert!(finished.is_some());
     }
 
     #[tokio::test]
     async fn run_turn_cancel_handle_signals_session() {
         let provider = Arc::new(EchoProvider);
-        let mut session = AgentSession::new(
+        let session = AgentSession::new(
             provider,
             "test-model",
             "",
@@ -609,11 +635,24 @@ mod tests {
 
         #[async_trait]
         impl Tool for NoopTool {
-            fn name(&self) -> &str { "noop" }
-            fn description(&self) -> &str { "no-op" }
-            fn parameters(&self) -> serde_json::Value { serde_json::json!({}) }
-            async fn call(&self, _args: serde_json::Value) -> anyhow::Result<String> {
-                Ok("done".to_string())
+            fn name(&self) -> &str {
+                "noop"
+            }
+            fn description(&self) -> &str {
+                "no-op"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            async fn execute(
+                &self,
+                _args: serde_json::Value,
+            ) -> anyhow::Result<crate::agent::ToolResult> {
+                Ok(crate::agent::ToolResult {
+                    success: true,
+                    output: "done".to_string(),
+                    error: None,
+                })
             }
         }
 

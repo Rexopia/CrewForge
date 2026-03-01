@@ -34,6 +34,9 @@ tui-textarea = { version = "0.7", features = ["crossterm"] }
 unicode-width = "0.2"
 uuid = { version = "1", features = ["v4"] }
 urlencoding = "2"
+glob = "0.3"
+walkdir = "2"
+which = "7"
 
 [dev-dependencies]
 assert_cmd = "2"

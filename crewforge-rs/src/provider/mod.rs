@@ -12,13 +12,13 @@ pub mod router;
 pub mod traits;
 
 pub use traits::{
-    build_tool_instructions_text, ChatMessage, ChatRequest, ChatResponse, ConversationMessage,
-    Provider, ProviderCapabilities, ToolCall, ToolResultMessage, ToolSpec, TokenUsage,
+    ChatMessage, ChatRequest, ChatResponse, ConversationMessage, Provider, ProviderCapabilities,
+    TokenUsage, ToolCall, ToolResultMessage, ToolSpec, build_tool_instructions_text,
 };
 
+pub use compatible::{api_error, sanitize_api_error};
 pub use reliable::ReliableProvider;
 pub use router::{Route, RouterProvider};
-pub use compatible::{api_error, sanitize_api_error};
 
 use compatible::{AuthStyle, OpenAiCompatibleProvider};
 
@@ -50,7 +50,10 @@ pub fn create_provider(
             resolved_key.as_deref(),
         )),
         "gemini" | "google" => Box::new(gemini::GeminiProvider::new(resolved_key.as_deref())),
-        "ollama" => Box::new(ollama::OllamaProvider::new(base_url, resolved_key.as_deref())),
+        "ollama" => Box::new(ollama::OllamaProvider::new(
+            base_url,
+            resolved_key.as_deref(),
+        )),
         "openrouter" => Box::new(openrouter::OpenRouterProvider::new(resolved_key.as_deref())),
         "glm" | "zhipuai" | "zhipu" => Box::new(glm::GlmProvider::new(resolved_key.as_deref())),
         "moonshot" | "kimi" => Box::new(OpenAiCompatibleProvider::new(
@@ -128,10 +131,10 @@ pub fn create_provider(
 }
 
 fn resolve_api_key(provider_name: &str, explicit: Option<&str>) -> Option<String> {
-    if let Some(k) = explicit {
-        if !k.is_empty() {
-            return Some(k.to_string());
-        }
+    if let Some(k) = explicit
+        && !k.is_empty()
+    {
+        return Some(k.to_string());
     }
     let env_var = default_api_key_env(provider_name)?;
     std::env::var(env_var).ok().filter(|k| !k.is_empty())

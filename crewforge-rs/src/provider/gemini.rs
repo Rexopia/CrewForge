@@ -205,12 +205,7 @@ impl GeminiProvider {
 
         let url = self.build_generate_content_url(model);
 
-        let response = self
-            .http_client()
-            .post(&url)
-            .json(&request)
-            .send()
-            .await?;
+        let response = self.http_client().post(&url).json(&request).send().await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -464,7 +459,12 @@ mod tests {
             .chat_with_system(None, "hello", "gemini-2.5-pro", 0.7)
             .await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("API key not found"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("API key not found")
+        );
         if let Some(v) = old_gemini {
             unsafe { std::env::set_var("GEMINI_API_KEY", v) };
         }

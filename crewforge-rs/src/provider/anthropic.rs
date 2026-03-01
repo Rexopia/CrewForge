@@ -38,10 +38,13 @@ struct ContentBlock {
     kind: String,
     #[serde(default)]
     text: Option<String>,
+    #[allow(dead_code)]
     #[serde(default)]
     id: Option<String>,
+    #[allow(dead_code)]
     #[serde(default)]
     name: Option<String>,
+    #[allow(dead_code)]
     #[serde(default)]
     input: Option<serde_json::Value>,
 }
@@ -208,15 +211,15 @@ impl AnthropicProvider {
 
     /// Apply cache control to the last message content block
     fn apply_cache_to_last_message(messages: &mut [NativeMessage]) {
-        if let Some(last_msg) = messages.last_mut() {
-            if let Some(last_content) = last_msg.content.last_mut() {
-                match last_content {
-                    NativeContentOut::Text { cache_control, .. }
-                    | NativeContentOut::ToolResult { cache_control, .. } => {
-                        *cache_control = Some(CacheControl::ephemeral());
-                    }
-                    NativeContentOut::ToolUse { .. } => {}
+        if let Some(last_msg) = messages.last_mut()
+            && let Some(last_content) = last_msg.content.last_mut()
+        {
+            match last_content {
+                NativeContentOut::Text { cache_control, .. }
+                | NativeContentOut::ToolResult { cache_control, .. } => {
+                    *cache_control = Some(CacheControl::ephemeral());
                 }
+                NativeContentOut::ToolUse { .. } => {}
             }
         }
     }
@@ -385,10 +388,10 @@ impl AnthropicProvider {
         for block in response.content {
             match block.kind.as_str() {
                 "text" => {
-                    if let Some(text) = block.text.map(|t| t.trim().to_string()) {
-                        if !text.is_empty() {
-                            text_parts.push(text);
-                        }
+                    if let Some(text) = block.text.map(|t| t.trim().to_string())
+                        && !text.is_empty()
+                    {
+                        text_parts.push(text);
                     }
                 }
                 "tool_use" => {
@@ -518,10 +521,10 @@ impl Provider for AnthropicProvider {
             .header("content-type", "application/json")
             .json(&native_request);
 
-        if let Some(tools) = &native_request.tools {
-            if !tools.is_empty() {
-                req = req.header("anthropic-beta", "prompt-caching-2024-07-31");
-            }
+        if let Some(tools) = &native_request.tools
+            && !tools.is_empty()
+        {
+            req = req.header("anthropic-beta", "prompt-caching-2024-07-31");
         }
 
         req = self.apply_auth(req, credential);
@@ -588,10 +591,12 @@ mod tests {
             .chat_with_system(None, "hello", "claude-sonnet-4", 0.7)
             .await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("credentials not set"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("credentials not set")
+        );
     }
 
     #[test]
@@ -654,16 +659,20 @@ mod tests {
         let (_, native) = AnthropicProvider::convert_messages(&messages);
         assert_eq!(native.len(), 2);
         // First message should contain ToolUse block
-        assert!(native[0]
-            .content
-            .iter()
-            .any(|c| matches!(c, NativeContentOut::ToolUse { .. })));
+        assert!(
+            native[0]
+                .content
+                .iter()
+                .any(|c| matches!(c, NativeContentOut::ToolUse { .. }))
+        );
         // Second message (tool result) becomes a user message with ToolResult block
         assert_eq!(native[1].role, "user");
-        assert!(native[1]
-            .content
-            .iter()
-            .any(|c| matches!(c, NativeContentOut::ToolResult { .. })));
+        assert!(
+            native[1]
+                .content
+                .iter()
+                .any(|c| matches!(c, NativeContentOut::ToolResult { .. }))
+        );
     }
 
     #[test]

@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use clap::Parser;
 use crewforge::{
     agent::{AgentEvent, AgentSession, AgentSessionConfig, StopReason, Tool},
-    provider::{self, ToolSpec},
+    provider::{self},
 };
 
 // ── CLI args ──────────────────────────────────────────────────────────────────
@@ -88,12 +88,19 @@ impl Tool for EchoTool {
         })
     }
 
-    async fn call(&self, args: serde_json::Value) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+    ) -> anyhow::Result<crewforge::agent::ToolResult> {
         let msg = args
             .get("message")
             .and_then(|v| v.as_str())
             .unwrap_or("[no message]");
-        Ok(format!("Echo: {msg}"))
+        Ok(crewforge::agent::ToolResult {
+            success: true,
+            output: format!("Echo: {msg}"),
+            error: None,
+        })
     }
 }
 
@@ -118,18 +125,24 @@ impl Tool for DatetimeTool {
         })
     }
 
-    async fn call(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+    ) -> anyhow::Result<crewforge::agent::ToolResult> {
         use std::time::{SystemTime, UNIX_EPOCH};
         let secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        // Simple ISO-like format without chrono
         let s = secs % 60;
         let m = (secs / 60) % 60;
         let h = (secs / 3600) % 24;
         let days = secs / 86400;
-        Ok(format!("UTC unix_day={days} {:02}:{:02}:{:02}", h, m, s))
+        Ok(crewforge::agent::ToolResult {
+            success: true,
+            output: format!("UTC unix_day={days} {:02}:{:02}:{:02}", h, m, s),
+            error: None,
+        })
     }
 }
 
@@ -153,21 +166,19 @@ fn print_event(event: &AgentEvent) {
                 if let Some(t) = text {
                     println!("{t}");
                 }
-            } else {
-                if let Some(t) = text {
-                    if !t.is_empty() {
-                        eprintln!("\x1b[2m[llm]: {t}\x1b[0m");
-                    }
-                }
+            } else if let Some(t) = text
+                && !t.is_empty()
+            {
+                eprintln!("\x1b[2m[llm]: {t}\x1b[0m");
             }
-            if let Some(u) = usage {
-                if u.input_tokens.is_some() || u.output_tokens.is_some() {
-                    eprintln!(
-                        "\x1b[2m[tokens] in={} out={}\x1b[0m",
-                        u.input_tokens.unwrap_or(0),
-                        u.output_tokens.unwrap_or(0)
-                    );
-                }
+            if let Some(u) = usage
+                && (u.input_tokens.is_some() || u.output_tokens.is_some())
+            {
+                eprintln!(
+                    "\x1b[2m[tokens] in={} out={}\x1b[0m",
+                    u.input_tokens.unwrap_or(0),
+                    u.output_tokens.unwrap_or(0)
+                );
             }
         }
         AgentEvent::ToolCallStarted {
@@ -206,10 +217,10 @@ fn print_event(event: &AgentEvent) {
                 iterations_used, reason
             );
             // final_text already printed via LlmResponse when tool_call_count==0
-            if *iterations_used == 0 {
-                if let Some(t) = final_text {
-                    println!("{t}");
-                }
+            if *iterations_used == 0
+                && let Some(t) = final_text
+            {
+                println!("{t}");
             }
         }
         AgentEvent::Error { message, fatal } => {
@@ -236,10 +247,7 @@ async fn main() -> anyhow::Result<()> {
         None // create_provider will pick it up from the env var
     } else {
         // Fall back to stored auth profile.
-        let svc = crewforge::auth::AuthService::new(
-            &crewforge::auth::default_state_dir(),
-            false,
-        );
+        let svc = crewforge::auth::AuthService::new(&crewforge::auth::default_state_dir(), false);
         svc.get_provider_bearer_token(&args.provider, None)
             .await
             .unwrap_or(None)
@@ -265,13 +273,7 @@ async fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
 
-    let mut session = AgentSession::new(
-        provider,
-        &args.model,
-        &args.system,
-        tools,
-        config,
-    );
+    let mut session = AgentSession::new(provider, &args.model, &args.system, tools, config);
 
     // Migration notice.
     eprintln!("\x1b[2m[note] agentctl is an internal tool. Use `crewforge agent` instead.\x1b[0m");
@@ -281,7 +283,11 @@ async fn main() -> anyhow::Result<()> {
         "\x1b[1magentctl\x1b[0m  provider={} model={} tools={}",
         args.provider,
         args.model,
-        if args.no_tools { "off" } else { "echo,get_datetime" }
+        if args.no_tools {
+            "off"
+        } else {
+            "echo,get_datetime"
+        }
     );
     if !args.no_tools {
         eprintln!("tools: echo(message), get_datetime()");

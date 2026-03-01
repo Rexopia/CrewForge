@@ -1,8 +1,8 @@
 //! Multi-model router that dispatches requests to different provider+model
 //! combinations based on a task hint encoded in the model parameter.
 
-use crate::provider::traits::{ChatMessage, ChatRequest, ChatResponse};
 use crate::provider::Provider;
+use crate::provider::traits::{ChatMessage, ChatRequest, ChatResponse};
 use async_trait::async_trait;
 use std::collections::HashMap;
 
@@ -25,6 +25,7 @@ pub struct RouterProvider {
     routes: HashMap<String, (usize, String)>, // hint → (provider_index, model)
     providers: Vec<(String, Box<dyn Provider>)>,
     default_index: usize,
+    #[allow(dead_code)]
     default_model: String,
 }
 

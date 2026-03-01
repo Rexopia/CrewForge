@@ -9,8 +9,8 @@
 //! Loop invariant: `failures` accumulates every failed attempt so the final
 //! error message gives operators a complete diagnostic trail.
 
-use crate::provider::traits::{ChatMessage, ChatRequest, ChatResponse};
 use crate::provider::Provider;
+use crate::provider::traits::{ChatMessage, ChatRequest, ChatResponse};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -30,20 +30,20 @@ fn is_non_retryable(err: &anyhow::Error) -> bool {
 
     // 4xx errors are generally non-retryable (bad request, auth failure, etc.),
     // except 429 (rate-limit — transient) and 408 (timeout — worth retrying).
-    if let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>() {
-        if let Some(status) = reqwest_err.status() {
-            let code = status.as_u16();
-            return status.is_client_error() && code != 429 && code != 408;
-        }
+    if let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>()
+        && let Some(status) = reqwest_err.status()
+    {
+        let code = status.as_u16();
+        return status.is_client_error() && code != 429 && code != 408;
     }
     // Fallback: parse status codes from stringified errors (some providers
     // embed codes in error messages rather than returning typed HTTP errors).
     let msg = err.to_string();
     for word in msg.split(|c: char| !c.is_ascii_digit()) {
-        if let Ok(code) = word.parse::<u16>() {
-            if (400..500).contains(&code) {
-                return code != 429 && code != 408;
-            }
+        if let Ok(code) = word.parse::<u16>()
+            && (400..500).contains(&code)
+        {
+            return code != 429 && code != 408;
         }
     }
 
@@ -97,10 +97,10 @@ fn is_context_window_exceeded(err: &anyhow::Error) -> bool {
 
 /// Check if an error is a rate-limit (429) error.
 fn is_rate_limited(err: &anyhow::Error) -> bool {
-    if let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>() {
-        if let Some(status) = reqwest_err.status() {
-            return status.as_u16() == 429;
-        }
+    if let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>()
+        && let Some(status) = reqwest_err.status()
+    {
+        return status.as_u16() == 429;
     }
     let msg = err.to_string();
     msg.contains("429")
@@ -143,10 +143,10 @@ fn is_non_retryable_rate_limit(err: &anyhow::Error) -> bool {
 
     // Known provider business codes observed for 429 where retry is futile.
     for token in lower.split(|c: char| !c.is_ascii_digit()) {
-        if let Ok(code) = token.parse::<u16>() {
-            if matches!(code, 1113 | 1311) {
-                return true;
-            }
+        if let Ok(code) = token.parse::<u16>()
+            && matches!(code, 1113 | 1311)
+        {
+            return true;
         }
     }
 
@@ -173,12 +173,13 @@ fn parse_retry_after_ms(err: &anyhow::Error) -> Option<u64> {
                 .chars()
                 .take_while(|c| c.is_ascii_digit() || *c == '.')
                 .collect();
-            if let Ok(secs) = num_str.parse::<f64>() {
-                if secs.is_finite() && secs >= 0.0 {
-                    let millis = Duration::from_secs_f64(secs).as_millis();
-                    if let Ok(value) = u64::try_from(millis) {
-                        return Some(value);
-                    }
+            if let Ok(secs) = num_str.parse::<f64>()
+                && secs.is_finite()
+                && secs >= 0.0
+            {
+                let millis = Duration::from_secs_f64(secs).as_millis();
+                if let Ok(value) = u64::try_from(millis) {
+                    return Some(value);
                 }
             }
         }
@@ -410,17 +411,18 @@ impl Provider for ReliableProvider {
 
                             // Rate-limit with rotatable keys: cycle to the next API key
                             // so the retry hits a different quota bucket.
-                            if rate_limited && !non_retryable_rate_limit {
-                                if let Some(new_key) = self.rotate_key() {
-                                    tracing::warn!(
-                                        provider = provider_name,
-                                        error = %error_detail,
-                                        "Rate limited; key rotation selected key ending ...{} \
-                                         but cannot apply (Provider trait has no set_api_key). \
-                                         Retrying with original key.",
-                                        &new_key[new_key.len().saturating_sub(4)..]
-                                    );
-                                }
+                            if rate_limited
+                                && !non_retryable_rate_limit
+                                && let Some(new_key) = self.rotate_key()
+                            {
+                                tracing::warn!(
+                                    provider = provider_name,
+                                    error = %error_detail,
+                                    "Rate limited; key rotation selected key ending ...{} \
+                                     but cannot apply (Provider trait has no set_api_key). \
+                                     Retrying with original key.",
+                                    &new_key[new_key.len().saturating_sub(4)..]
+                                );
                             }
 
                             if non_retryable {
@@ -528,17 +530,18 @@ impl Provider for ReliableProvider {
                                 &error_detail,
                             );
 
-                            if rate_limited && !non_retryable_rate_limit {
-                                if let Some(new_key) = self.rotate_key() {
-                                    tracing::warn!(
-                                        provider = provider_name,
-                                        error = %error_detail,
-                                        "Rate limited; key rotation selected key ending ...{} \
-                                         but cannot apply (Provider trait has no set_api_key). \
-                                         Retrying with original key.",
-                                        &new_key[new_key.len().saturating_sub(4)..]
-                                    );
-                                }
+                            if rate_limited
+                                && !non_retryable_rate_limit
+                                && let Some(new_key) = self.rotate_key()
+                            {
+                                tracing::warn!(
+                                    provider = provider_name,
+                                    error = %error_detail,
+                                    "Rate limited; key rotation selected key ending ...{} \
+                                     but cannot apply (Provider trait has no set_api_key). \
+                                     Retrying with original key.",
+                                    &new_key[new_key.len().saturating_sub(4)..]
+                                );
                             }
 
                             if non_retryable {
@@ -652,17 +655,18 @@ impl Provider for ReliableProvider {
                                 &error_detail,
                             );
 
-                            if rate_limited && !non_retryable_rate_limit {
-                                if let Some(new_key) = self.rotate_key() {
-                                    tracing::warn!(
-                                        provider = provider_name,
-                                        error = %error_detail,
-                                        "Rate limited; key rotation selected key ending ...{} \
-                                         but cannot apply (Provider trait has no set_api_key). \
-                                         Retrying with original key.",
-                                        &new_key[new_key.len().saturating_sub(4)..]
-                                    );
-                                }
+                            if rate_limited
+                                && !non_retryable_rate_limit
+                                && let Some(new_key) = self.rotate_key()
+                            {
+                                tracing::warn!(
+                                    provider = provider_name,
+                                    error = %error_detail,
+                                    "Rate limited; key rotation selected key ending ...{} \
+                                     but cannot apply (Provider trait has no set_api_key). \
+                                     Retrying with original key.",
+                                    &new_key[new_key.len().saturating_sub(4)..]
+                                );
                             }
 
                             if non_retryable {
@@ -763,17 +767,18 @@ impl Provider for ReliableProvider {
                                 &error_detail,
                             );
 
-                            if rate_limited && !non_retryable_rate_limit {
-                                if let Some(new_key) = self.rotate_key() {
-                                    tracing::warn!(
-                                        provider = provider_name,
-                                        error = %error_detail,
-                                        "Rate limited; key rotation selected key ending ...{} \
-                                         but cannot apply (Provider trait has no set_api_key). \
-                                         Retrying with original key.",
-                                        &new_key[new_key.len().saturating_sub(4)..]
-                                    );
-                                }
+                            if rate_limited
+                                && !non_retryable_rate_limit
+                                && let Some(new_key) = self.rotate_key()
+                            {
+                                tracing::warn!(
+                                    provider = provider_name,
+                                    error = %error_detail,
+                                    "Rate limited; key rotation selected key ending ...{} \
+                                     but cannot apply (Provider trait has no set_api_key). \
+                                     Retrying with original key.",
+                                    &new_key[new_key.len().saturating_sub(4)..]
+                                );
                             }
 
                             if non_retryable {
