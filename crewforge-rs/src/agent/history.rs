@@ -47,34 +47,6 @@ pub fn to_provider_messages_native(history: &[ConversationMessage]) -> Vec<ChatM
         .collect()
 }
 
-/// Convert ConversationMessage history to flat ChatMessage list for XML/prompt-guided providers.
-///
-/// XmlDispatcher format:
-/// - `AssistantToolCalls` → plain assistant text message (reasoning_content dropped)
-/// - `ToolResults` → single user message with XML tool_result tags
-pub fn to_provider_messages_xml(history: &[ConversationMessage]) -> Vec<ChatMessage> {
-    history
-        .iter()
-        .flat_map(|msg| match msg {
-            ConversationMessage::Chat(chat) => vec![chat.clone()],
-            ConversationMessage::AssistantToolCalls { text, .. } => {
-                vec![ChatMessage::assistant(text.clone().unwrap_or_default())]
-            }
-            ConversationMessage::ToolResults(results) => {
-                let mut content = String::new();
-                for result in results {
-                    let _ = writeln!(
-                        content,
-                        "<tool_result id=\"{}\">\n{}\n</tool_result>",
-                        result.tool_call_id, result.content
-                    );
-                }
-                vec![ChatMessage::user(format!("[Tool results]\n{content}"))]
-            }
-        })
-        .collect()
-}
-
 /// Trim history to at most `max_messages` non-system ConversationMessages.
 ///
 /// Preserves the system prompt (first `Chat` with role=system) at index 0.
@@ -268,36 +240,6 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_str(&msgs[0].content).unwrap();
         assert_eq!(payload["tool_call_id"].as_str(), Some("tc1"));
         assert_eq!(payload["content"].as_str(), Some("output"));
-    }
-
-    #[test]
-    fn to_provider_messages_xml_assistant_tool_calls_text_only() {
-        let history = vec![ConversationMessage::AssistantToolCalls {
-            text: Some("answer".into()),
-            tool_calls: vec![ToolCall {
-                id: "tc1".into(),
-                name: "shell".into(),
-                arguments: "{}".into(),
-            }],
-            reasoning_content: Some("ignored".into()),
-        }];
-        let msgs = to_provider_messages_xml(&history);
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].role, "assistant");
-        assert_eq!(msgs[0].content, "answer");
-    }
-
-    #[test]
-    fn to_provider_messages_xml_tool_results_as_user() {
-        let history = vec![ConversationMessage::ToolResults(vec![ToolResultMessage {
-            tool_call_id: "tc1".into(),
-            content: "result_data".into(),
-        }])];
-        let msgs = to_provider_messages_xml(&history);
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].role, "user");
-        assert!(msgs[0].content.contains("[Tool results]"));
-        assert!(msgs[0].content.contains("result_data"));
     }
 
     #[test]
