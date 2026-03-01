@@ -40,6 +40,10 @@ impl crate::agent::Tool for FileWriteTool {
         })
     }
 
+    fn is_mutating(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let path = args
             .get("path")

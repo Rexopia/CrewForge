@@ -52,5 +52,11 @@ pub trait Tool: Send + Sync {
         }
     }
 
+    /// Whether this tool has side effects (writes files, runs commands, etc.).
+    /// Non-mutating tools (reads, searches) can be auto-approved and parallelized.
+    fn is_mutating(&self) -> bool {
+        false // safe default: assume read-only
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult>;
 }

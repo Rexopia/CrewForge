@@ -172,6 +172,13 @@ mod tests {
         })
     }
 
+    #[test]
+    fn file_read_tool_is_not_mutating() {
+        let security = Arc::new(SecurityPolicy::default());
+        let tool = FileReadTool::new(security);
+        assert!(!tool.is_mutating());
+    }
+
     #[tokio::test]
     async fn file_read_existing_file() {
         let dir = tempfile::tempdir().unwrap();
