@@ -72,12 +72,13 @@ agent_cmd.rs → AgentSession (agent/loop_.rs)
 
 ### Library crate (`crewforge` lib — `src/lib.rs`)
 
-Exports four public modules consumed by other crates/tools:
+Exports five public modules consumed by other crates/tools:
 
-- `crewforge::agent` — `AgentSession`, `AgentSessionConfig`, `Tool` trait, events
+- `crewforge::agent` — `AgentSession`, `AgentSessionConfig`, `Tool` trait, `ToolResult`, events
 - `crewforge::auth` — `AuthService`, `default_state_dir()`, OAuth flows
 - `crewforge::provider` — `create_provider()`, `Provider` trait, `ProviderRuntimeOptions`
-- `crewforge::security` — `SecretStore` (ChaCha20-Poly1305)
+- `crewforge::security` — `SecurityPolicy`, `AutonomyLevel`, `SecretStore` (ChaCha20-Poly1305)
+- `crewforge::tools` — `default_tools()`, `RuntimeAdapter`, 6 built-in tools
 
 ### Provider stack (`src/provider/`)
 
@@ -107,6 +108,86 @@ crewforge agent      # interactive single-agent REPL (native Rust provider stack
 ```
 
 `crewforge auth` subcommands: `login`, `paste-redirect`, `paste-token`, `refresh`, `logout`, `use`, `list`, `status`.
+
+## Target Architecture (Next Version Blueprint)
+
+The current `src/` layout will be restructured toward the following target. **All development should align with this direction. If a change conflicts with this blueprint, raise it for discussion before proceeding.**
+
+### Agent mental model (three layers)
+
+1. **Core orchestration** — one file owns the full decision chain: check → format → request → parse → dispatch → check. Helper modules for message conversion, codec, scrubbing.
+2. **Basic capabilities** — read/write (fundamental), tools/MCPs (built-in + external), web_search (internet access).
+3. **Extra context** — memory/skills injected as context, not standalone tools. Built-in tools can be used to interact with them.
+
+**Sandbox** is an external constraint on the agent (not a capability).
+
+### Target directory structure
+
+```
+crewforge-rs/src/
+│
+│  ── library crate (lib.rs exports: agent, provider, auth) ──
+│
+├── agent/                        # Standalone agent: all self-contained logic
+│   ├── mod.rs                    #   Public API: Tool, ToolResult, AgentSession, AgentEvent
+│   ├── orchestrate.rs            #   Core orchestration loop (single file, all decision flow)
+│   ├── history.rs                #   Helper: message conversion, trim, compact
+│   ├── dispatch.rs               #   Helper: Native/XML codec
+│   ├── scrub.rs                  #   Helper: credential scrubbing
+│   ├── tools/                    #   Built-in tools (shell, file_read/write/edit, glob, content_search)
+│   │   ├── mod.rs                #     default_tools() factory
+│   │   └── traits.rs             #     RuntimeAdapter
+│   ├── sandbox/                  #   Security policy + approval
+│   │   ├── mod.rs
+│   │   ├── policy.rs             #     SecurityPolicy (path ACL, command allowlist, rate-limit)
+│   │   └── autonomy.rs           #     AutonomyLevel
+│   └── context/                  #   Placeholder for memory (S3), skills (S5)
+│       └── mod.rs
+│
+├── provider/                     # LLM backends: Provider trait + 16 implementations
+│   ├── mod.rs                    #   create_provider() factory
+│   ├── traits.rs                 #   Provider trait, ChatMessage, ToolSpec, etc.
+│   ├── compatible.rs             #   OpenAI-compatible base
+│   ├── reliable.rs               #   Retry wrapper
+│   └── router.rs                 #   Round-robin router
+│
+├── auth/                         # Credential management: OAuth, API key, profiles
+│
+│  ── binary crate (main.rs) ──
+│
+├── launcher/                     # CLI entry points
+│   ├── agent_cmd.rs              #   crewforge agent
+│   ├── chat_cmd.rs               #   crewforge chat
+│   ├── init_cmd.rs               #   crewforge init
+│   └── auth_cmd.rs               #   crewforge auth
+│
+├── orchestrator/                 # Multi-agent coordination (keep opencode subprocess for now)
+│   ├── kernel.rs                 #   SessionKernel
+│   ├── hub.rs                    #   RoomHub
+│   └── mcp_server.rs            #   MCP server (axum + rmcp)
+│
+└── tui/                          # Terminal UI
+```
+
+### Dependency direction (no cycles)
+
+```
+launcher ──→ agent ──→ provider
+    │            │
+    ├──→ tui     ├──→ sandbox/  (agent internal)
+    │            └──→ tools/    (agent internal)
+    └──→ orchestrator ──→ (subprocess, does not depend on agent yet)
+              │
+              └──→ auth
+```
+
+### Key decisions
+
+- **tools/ and sandbox/ move inside agent/** — tools are agent capabilities, not top-level modules. External path changes from `crewforge::tools::*` to `crewforge::agent::tools::*`.
+- **orchestrator/ stays in binary crate** — currently spawns opencode subprocesses, not Rust AgentSession. Will be refactored to use agent/ directly once agent is robust enough to replace opencode.
+- **launcher/ and tui/ stay in binary crate** — keeps library crate free of CLI dependencies (clap, crossterm, ratatui).
+- **provider/ types (ChatMessage, ToolSpec, etc.) stay in provider/** — agent/ depends on provider/ unidirectionally. If protocol types become too entangled, consider extracting a `types/` module later.
+- **Incremental migration** — no big-bang refactor. Develop new code toward this structure; migrate existing code when touching it.
 
 ## Key Patterns and Gotchas
 
