@@ -14,12 +14,13 @@ use std::io::{self, BufRead, Write};
 use std::sync::Arc;
 
 use anyhow::Result;
-use async_trait::async_trait;
 use clap::Args;
 use crewforge::{
     agent::{AgentEvent, AgentSession, AgentSessionConfig, StopReason, Tool},
     auth::{AuthService, default_state_dir},
     provider::{self, default_api_key_env},
+    security::SecurityPolicy,
+    tools::{default_tools, TokioRuntime},
 };
 
 // ── Clap args ─────────────────────────────────────────────────────────────────
@@ -57,62 +58,6 @@ pub struct AgentArgs {
     /// Sampling temperature [default: 0.7]
     #[arg(long, default_value = "0.7")]
     temperature: f64,
-}
-
-// ── Built-in test tools ───────────────────────────────────────────────────────
-
-struct EchoTool;
-
-#[async_trait]
-impl Tool for EchoTool {
-    fn name(&self) -> &str { "echo" }
-    fn description(&self) -> &str {
-        "Echo back the provided message. Useful for verifying that tool calling works end-to-end."
-    }
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "message": {"type": "string", "description": "The message to echo back"}
-            },
-            "required": ["message"]
-        })
-    }
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<crewforge::agent::ToolResult> {
-        let msg = args.get("message").and_then(|v| v.as_str()).unwrap_or("[no message]");
-        Ok(crewforge::agent::ToolResult {
-            success: true,
-            output: format!("Echo: {msg}"),
-            error: None,
-        })
-    }
-}
-
-struct DatetimeTool;
-
-#[async_trait]
-impl Tool for DatetimeTool {
-    fn name(&self) -> &str { "get_datetime" }
-    fn description(&self) -> &str { "Get the current UTC date and time." }
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({"type": "object", "properties": {}, "required": []})
-    }
-    async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<crewforge::agent::ToolResult> {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let s = secs % 60;
-        let m = (secs / 60) % 60;
-        let h = (secs / 3600) % 24;
-        let days = secs / 86400;
-        Ok(crewforge::agent::ToolResult {
-            success: true,
-            output: format!("UTC unix_day={days} {:02}:{:02}:{:02}", h, m, s),
-            error: None,
-        })
-    }
 }
 
 // ── Event rendering ───────────────────────────────────────────────────────────
@@ -205,7 +150,13 @@ pub async fn run(args: AgentArgs) -> Result<()> {
     let tools: Vec<Box<dyn Tool>> = if args.no_tools {
         vec![]
     } else {
-        vec![Box::new(EchoTool), Box::new(DatetimeTool)]
+        let workspace = std::env::current_dir().unwrap_or_else(|_| ".".into());
+        let security = Arc::new(SecurityPolicy {
+            workspace_dir: workspace,
+            ..SecurityPolicy::default()
+        });
+        let runtime = Arc::new(TokioRuntime);
+        default_tools(security, runtime)
     };
 
     let config = AgentSessionConfig {
@@ -214,17 +165,15 @@ pub async fn run(args: AgentArgs) -> Result<()> {
         ..Default::default()
     };
 
+    let tool_names: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
     let mut session = AgentSession::new(provider, &args.model, &args.system, tools, config);
 
     eprintln!(
         "\x1b[1mcrewforge agent\x1b[0m  provider={} model={} tools={}",
         args.provider,
         args.model,
-        if args.no_tools { "off" } else { "echo,get_datetime" }
+        if args.no_tools { "off".to_string() } else { tool_names.join(", ") }
     );
-    if !args.no_tools {
-        eprintln!("tools: echo(message), get_datetime()");
-    }
     eprintln!("Type your message and press Enter. Ctrl-D to exit.\n");
 
     let stdin = io::stdin();
