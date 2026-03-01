@@ -1,7 +1,6 @@
 pub mod dispatcher;
 pub mod history;
 pub mod loop_;
-pub mod prompt;
 
 pub use loop_::{AgentEvent, AgentSession, AgentSessionConfig, StopReason};
 
