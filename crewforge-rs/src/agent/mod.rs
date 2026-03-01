@@ -18,6 +18,24 @@ pub struct ToolResult {
     pub error: Option<String>,
 }
 
+impl ToolResult {
+    pub fn ok(output: impl Into<String>) -> Self {
+        Self {
+            success: true,
+            output: output.into(),
+            error: None,
+        }
+    }
+
+    pub fn denied(message: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            output: String::new(),
+            error: Some(message.into()),
+        }
+    }
+}
+
 /// Generic tool interface. Implement this for any tool the agent can use.
 /// CrewForge hub tools (HubGet, HubAck, HubPost) implement this trait.
 #[async_trait]

@@ -1,5 +1,6 @@
 use crate::agent::ToolResult;
 use crate::security::SecurityPolicy;
+use crate::security::policy::is_valid_env_var_name;
 use crate::tools::traits::RuntimeAdapter;
 use async_trait::async_trait;
 use std::collections::HashSet;
@@ -21,18 +22,6 @@ impl ShellTool {
     pub fn new(security: Arc<SecurityPolicy>, runtime: Arc<dyn RuntimeAdapter>) -> Self {
         Self { security, runtime }
     }
-}
-
-fn is_valid_env_var_name(name: &str) -> bool {
-    if name.is_empty() {
-        return false;
-    }
-    let mut chars = name.chars();
-    let first = chars.next().unwrap();
-    if !first.is_ascii_alphabetic() && first != '_' {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 pub(crate) fn collect_allowed_shell_env_vars(security: &SecurityPolicy) -> Vec<String> {
@@ -184,6 +173,9 @@ impl crate::agent::Tool for ShellTool {
                 });
             }
         };
+        // Environment sandboxing: clear all env vars then selectively restore
+        // safe ones. This is intentionally done here (not in RuntimeAdapter) so
+        // the security policy controls which vars are passed through.
         cmd.env_clear();
 
         for var in collect_allowed_shell_env_vars(&self.security) {

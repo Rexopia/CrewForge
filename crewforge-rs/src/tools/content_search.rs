@@ -2,7 +2,7 @@ use crate::agent::ToolResult;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use std::process::Stdio;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock};
 
 const MAX_RESULTS: usize = 1000;
 const MAX_OUTPUT_BYTES: usize = 1_048_576; // 1 MB
@@ -130,14 +130,6 @@ impl crate::agent::Tool for ContentSearchTool {
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as usize;
 
-        #[allow(clippy::cast_possible_truncation)]
-        let max_results = args
-            .get("max_results")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-            .unwrap_or(MAX_RESULTS)
-            .min(MAX_RESULTS);
-
         if self.security.is_rate_limited() {
             return Ok(ToolResult {
                 success: false,
@@ -204,7 +196,6 @@ impl crate::agent::Tool for ContentSearchTool {
             });
         }
 
-        // Build command
         let mut cmd = if self.has_rg {
             build_rg_command(
                 pattern,
@@ -235,31 +226,26 @@ impl crate::agent::Tool for ContentSearchTool {
             }
         }
 
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-
-        let output = match tokio::time::timeout(
-            std::time::Duration::from_secs(TIMEOUT_SECS),
-            tokio::process::Command::from(cmd).output(),
-        )
-        .await
-        {
-            Ok(Ok(out)) => out,
-            Ok(Err(e)) => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("Failed to execute search command: {e}")),
-                });
-            }
-            Err(_) => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("Search timed out after {TIMEOUT_SECS} seconds.")),
-                });
-            }
-        };
+        let output =
+            match tokio::time::timeout(std::time::Duration::from_secs(TIMEOUT_SECS), cmd.output())
+                .await
+            {
+                Ok(Ok(out)) => out,
+                Ok(Err(e)) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!("Failed to execute search command: {e}")),
+                    });
+                }
+                Err(_) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!("Search timed out after {TIMEOUT_SECS} seconds.")),
+                    });
+                }
+            };
 
         // Exit code: 0 = matches found, 1 = no matches (grep/rg), 2 = error
         let exit_code = output.status.code().unwrap_or(-1);
@@ -277,7 +263,7 @@ impl crate::agent::Tool for ContentSearchTool {
         let workspace_canon =
             std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.clone());
 
-        let formatted = format_line_output(&raw_stdout, &workspace_canon, output_mode, max_results);
+        let formatted = format_line_output(&raw_stdout, &workspace_canon, output_mode, MAX_RESULTS);
 
         // Truncate if too large
         let final_output = if formatted.len() > MAX_OUTPUT_BYTES {
@@ -304,12 +290,14 @@ fn build_rg_command(
     case_sensitive: bool,
     context_before: usize,
     context_after: usize,
-) -> std::process::Command {
-    let mut cmd = std::process::Command::new("rg");
+) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new("rg");
 
     cmd.arg("--no-heading");
     cmd.arg("--line-number");
     cmd.arg("--with-filename");
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
 
     match output_mode {
         "files_with_matches" => {
@@ -351,13 +339,15 @@ fn build_grep_command(
     case_sensitive: bool,
     context_before: usize,
     context_after: usize,
-) -> std::process::Command {
-    let mut cmd = std::process::Command::new("grep");
+) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new("grep");
 
     cmd.arg("-r");
     cmd.arg("-n");
     cmd.arg("-E");
     cmd.arg("--binary-files=without-match");
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
 
     match output_mode {
         "files_with_matches" => {
@@ -403,20 +393,18 @@ fn relativize_path(line: &str, workspace_prefix: &str) -> String {
 }
 
 fn parse_content_line(line: &str) -> Option<(&str, bool)> {
-    static MATCH_RE: OnceLock<regex::Regex> = OnceLock::new();
-    static CONTEXT_RE: OnceLock<regex::Regex> = OnceLock::new();
-
-    let match_re = MATCH_RE.get_or_init(|| {
+    static MATCH_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
         regex::Regex::new(r"^(?P<path>.+?):\d+:").expect("match line regex must be valid")
     });
-    if let Some(caps) = match_re.captures(line) {
+    static CONTEXT_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"^(?P<path>.+?)-\d+-").expect("context line regex must be valid")
+    });
+
+    if let Some(caps) = MATCH_RE.captures(line) {
         return caps.name("path").map(|m| (m.as_str(), true));
     }
 
-    let context_re = CONTEXT_RE.get_or_init(|| {
-        regex::Regex::new(r"^(?P<path>.+?)-\d+-").expect("context line regex must be valid")
-    });
-    if let Some(caps) = context_re.captures(line) {
+    if let Some(caps) = CONTEXT_RE.captures(line) {
         return caps.name("path").map(|m| (m.as_str(), false));
     }
 
@@ -424,12 +412,11 @@ fn parse_content_line(line: &str) -> Option<(&str, bool)> {
 }
 
 fn parse_count_line(line: &str) -> Option<(&str, usize)> {
-    static COUNT_RE: OnceLock<regex::Regex> = OnceLock::new();
-    let count_re = COUNT_RE.get_or_init(|| {
+    static COUNT_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
         regex::Regex::new(r"^(?P<path>.+?):(?P<count>\d+)\s*$").expect("count line regex valid")
     });
 
-    let caps = count_re.captures(line)?;
+    let caps = COUNT_RE.captures(line)?;
     let path = caps.name("path")?.as_str();
     let count = caps.name("count")?.as_str().parse::<usize>().ok()?;
     Some((path, count))

@@ -378,7 +378,7 @@ fn contains_unquoted_char(command: &str, target: char) -> bool {
     false
 }
 
-fn is_valid_env_var_name(name: &str) -> bool {
+pub(crate) fn is_valid_env_var_name(name: &str) -> bool {
     !name.is_empty()
         && name
             .chars()

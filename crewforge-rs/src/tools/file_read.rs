@@ -53,27 +53,13 @@ impl crate::agent::Tool for FileReadTool {
             .ok_or_else(|| anyhow::anyhow!("Missing 'path' parameter"))?;
 
         if self.security.is_rate_limited() {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("Rate limit exceeded".into()),
-            });
+            return Ok(ToolResult::denied("Rate limit exceeded"));
         }
 
         if !self.security.is_path_allowed(path) {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!("Path not allowed by security policy: {path}")),
-            });
-        }
-
-        if !self.security.record_action() {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("Rate limit exceeded: action budget exhausted".into()),
-            });
+            return Ok(ToolResult::denied(format!(
+                "Path not allowed by security policy: {path}"
+            )));
         }
 
         let full_path = self.security.workspace_dir.join(path);
@@ -81,44 +67,32 @@ impl crate::agent::Tool for FileReadTool {
         let resolved_path = match tokio::fs::canonicalize(&full_path).await {
             Ok(p) => p,
             Err(e) => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("Failed to resolve file path: {e}")),
-                });
+                return Ok(ToolResult::denied(format!(
+                    "Failed to resolve file path: {e}"
+                )));
             }
         };
 
         if !self.security.is_resolved_path_allowed(&resolved_path) {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(
-                    self.security
-                        .resolved_path_violation_message(&resolved_path),
-                ),
-            });
+            return Ok(ToolResult::denied(
+                self.security
+                    .resolved_path_violation_message(&resolved_path),
+            ));
         }
 
         match tokio::fs::metadata(&resolved_path).await {
             Ok(meta) => {
                 if meta.len() > MAX_FILE_SIZE_BYTES {
-                    return Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some(format!(
-                            "File too large: {} bytes (limit: {MAX_FILE_SIZE_BYTES} bytes)",
-                            meta.len()
-                        )),
-                    });
+                    return Ok(ToolResult::denied(format!(
+                        "File too large: {} bytes (limit: {MAX_FILE_SIZE_BYTES} bytes)",
+                        meta.len()
+                    )));
                 }
             }
             Err(e) => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("Failed to read file metadata: {e}")),
-                });
+                return Ok(ToolResult::denied(format!(
+                    "Failed to read file metadata: {e}"
+                )));
             }
         }
 
@@ -128,11 +102,7 @@ impl crate::agent::Tool for FileReadTool {
                 let total = lines.len();
 
                 if total == 0 {
-                    return Ok(ToolResult {
-                        success: true,
-                        output: String::new(),
-                        error: None,
-                    });
+                    return Ok(ToolResult::ok(""));
                 }
 
                 let offset = args
@@ -155,11 +125,9 @@ impl crate::agent::Tool for FileReadTool {
                 };
 
                 if start >= end {
-                    return Ok(ToolResult {
-                        success: true,
-                        output: format!("[No lines in range, file has {total} lines]"),
-                        error: None,
-                    });
+                    return Ok(ToolResult::ok(format!(
+                        "[No lines in range, file has {total} lines]"
+                    )));
                 }
 
                 let numbered: String = lines[start..end]
@@ -176,11 +144,7 @@ impl crate::agent::Tool for FileReadTool {
                     format!("\n[{total} lines total]")
                 };
 
-                Ok(ToolResult {
-                    success: true,
-                    output: format!("{numbered}{summary}"),
-                    error: None,
-                })
+                Ok(ToolResult::ok(format!("{numbered}{summary}")))
             }
             Err(_) => {
                 let bytes = tokio::fs::read(&resolved_path)
@@ -188,11 +152,7 @@ impl crate::agent::Tool for FileReadTool {
                     .map_err(|e| anyhow::anyhow!("Failed to read file: {e}"))?;
 
                 let lossy = String::from_utf8_lossy(&bytes).into_owned();
-                Ok(ToolResult {
-                    success: true,
-                    output: lossy,
-                    error: None,
-                })
+                Ok(ToolResult::ok(lossy))
             }
         }
     }

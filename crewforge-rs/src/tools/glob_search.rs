@@ -81,62 +81,69 @@ impl crate::agent::Tool for GlobSearchTool {
 
         let workspace = &self.security.workspace_dir;
         let full_pattern = workspace.join(pattern).to_string_lossy().to_string();
+        let security = self.security.clone();
+        let pattern_owned = pattern.to_string();
 
-        let entries = match glob::glob(&full_pattern) {
-            Ok(paths) => paths,
-            Err(e) => {
+        let (results, truncated) = match tokio::task::spawn_blocking(move || {
+            let entries = match glob::glob(&full_pattern) {
+                Ok(paths) => paths,
+                Err(e) => return Err(format!("Invalid glob pattern: {e}")),
+            };
+
+            let workspace_canon = match std::fs::canonicalize(&security.workspace_dir) {
+                Ok(p) => p,
+                Err(e) => return Err(format!("Cannot resolve workspace directory: {e}")),
+            };
+
+            let mut results = Vec::new();
+            let mut truncated = false;
+
+            for entry in entries {
+                let path = match entry {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+
+                let resolved = match std::fs::canonicalize(&path) {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+
+                if !security.is_resolved_path_allowed(&resolved) {
+                    continue;
+                }
+
+                if resolved.is_dir() {
+                    continue;
+                }
+
+                if let Ok(rel) = resolved.strip_prefix(&workspace_canon) {
+                    results.push(rel.to_string_lossy().to_string());
+                }
+
+                if results.len() >= MAX_RESULTS {
+                    truncated = true;
+                    break;
+                }
+            }
+
+            results.sort();
+            Ok((results, truncated))
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("Glob task panicked: {e}")))
+        {
+            Ok(pair) => pair,
+            Err(msg) => {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("Invalid glob pattern: {e}")),
+                    error: Some(msg),
                 });
             }
         };
 
-        let workspace_canon = match std::fs::canonicalize(workspace) {
-            Ok(p) => p,
-            Err(e) => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("Cannot resolve workspace directory: {e}")),
-                });
-            }
-        };
-
-        let mut results = Vec::new();
-        let mut truncated = false;
-
-        for entry in entries {
-            let path = match entry {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-
-            let resolved = match std::fs::canonicalize(&path) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-
-            if !self.security.is_resolved_path_allowed(&resolved) {
-                continue;
-            }
-
-            if resolved.is_dir() {
-                continue;
-            }
-
-            if let Ok(rel) = resolved.strip_prefix(&workspace_canon) {
-                results.push(rel.to_string_lossy().to_string());
-            }
-
-            if results.len() >= MAX_RESULTS {
-                truncated = true;
-                break;
-            }
-        }
-
-        results.sort();
+        let pattern = &pattern_owned;
 
         let output = if results.is_empty() {
             format!("No files matching pattern '{pattern}' found in workspace.")
