@@ -6,15 +6,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::Tool;
-use super::dispatcher::{
-    NativeToolDispatcher, ParsedToolCall, ToolDispatcher, ToolExecutionResult, XmlToolDispatcher,
-};
-use super::history::{
-    auto_compact_history, to_provider_messages_native, to_provider_messages_xml, trim_history,
-};
-use crate::provider::traits::{
-    ChatMessage, ChatRequest, ConversationMessage, Provider, ToolCall, ToolSpec,
-};
+use super::dispatcher::{self, ParsedToolCall, ToolExecutionResult};
+use super::history::{auto_compact_history, to_provider_messages_native, trim_history};
+use crate::provider::traits::{ChatMessage, ChatRequest, ConversationMessage, Provider, ToolSpec};
 
 // ── Public event/config/stop types ───────────────────────────────────────────
 
@@ -144,7 +138,6 @@ impl AgentSession {
         .await;
         trim_history(&mut self.history, self.config.max_history_messages);
 
-        let use_native = self.provider.supports_native_tools() && !self.tools.is_empty();
         let tool_specs: Vec<ToolSpec> = self.tools.iter().map(|t| t.spec()).collect();
         let mut seen_signatures: HashSet<(String, String)> = HashSet::new();
         let mut final_text: Option<String> = None;
@@ -164,30 +157,21 @@ impl AgentSession {
             iterations_used = iteration + 1;
 
             // Build provider messages from history.
-            let messages = if use_native {
-                to_provider_messages_native(&self.history)
-            } else {
-                to_provider_messages_xml(&self.history)
-            };
+            let messages = to_provider_messages_native(&self.history);
 
             // Call the provider.
-            let response = if use_native && !tool_specs.is_empty() {
-                let request = ChatRequest {
-                    messages: &messages,
-                    tools: Some(&tool_specs),
-                };
-                self.provider
-                    .chat(request, &self.model, self.config.temperature)
-                    .await
-            } else {
-                let request = ChatRequest {
-                    messages: &messages,
-                    tools: None,
-                };
-                self.provider
-                    .chat(request, &self.model, self.config.temperature)
-                    .await
+            let request = ChatRequest {
+                messages: &messages,
+                tools: if tool_specs.is_empty() {
+                    None
+                } else {
+                    Some(&tool_specs)
+                },
             };
+            let response = self
+                .provider
+                .chat(request, &self.model, self.config.temperature)
+                .await;
 
             let response = match response {
                 Ok(r) => r,
@@ -206,11 +190,7 @@ impl AgentSession {
             };
 
             // Parse tool calls from the response.
-            let (text, parsed_calls) = if use_native {
-                NativeToolDispatcher.parse_response(&response)
-            } else {
-                XmlToolDispatcher.parse_response(&response)
-            };
+            let (text, parsed_calls) = dispatcher::parse_response(&response);
 
             let usage = response.usage.clone();
 
@@ -240,18 +220,7 @@ impl AgentSession {
             }
 
             // Store the assistant's tool-call turn in history.
-            let tool_calls_for_history: Vec<ToolCall> = if use_native {
-                response.tool_calls.clone()
-            } else {
-                parsed_calls
-                    .iter()
-                    .map(|pc| ToolCall {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        name: pc.name.clone(),
-                        arguments: pc.arguments.to_string(),
-                    })
-                    .collect()
-            };
+            let tool_calls_for_history = response.tool_calls.clone();
             self.history.push(ConversationMessage::AssistantToolCalls {
                 text: if text.is_empty() {
                     None
@@ -308,11 +277,7 @@ impl AgentSession {
             }
 
             // Store tool results in history.
-            let history_entry = if use_native {
-                NativeToolDispatcher.format_results(&tool_results)
-            } else {
-                XmlToolDispatcher.format_results(&tool_results)
-            };
+            let history_entry = dispatcher::format_results(&tool_results);
             self.history.push(history_entry);
 
             // Check cancellation after each tool batch.
@@ -583,13 +548,15 @@ mod tests {
 
         let events = session.run_turn("anything").await;
 
-        // First turn is consumed (provider called once before cancel check kicks in
-        // inside the loop), OR cancelled before LLM call — depends on loop ordering.
-        // Either way we must have a TurnFinished with Cancelled or Done.
-        let finished = events
-            .iter()
-            .find(|e| matches!(e, AgentEvent::TurnFinished { .. }));
-        assert!(finished.is_some());
+        // Cancellation check is the first statement in the loop body,
+        // so a pre-cancelled session always produces StopReason::Cancelled.
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::TurnFinished {
+                stop_reason: StopReason::Cancelled,
+                ..
+            }
+        )));
     }
 
     #[tokio::test]
@@ -611,7 +578,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_turn_max_iterations() {
-        // Provider that always returns a tool call so iterations keep running.
+        // Provider that always returns a native tool call so iterations keep running.
         struct LoopProvider;
 
         #[async_trait]
@@ -623,10 +590,25 @@ mod tests {
                 _model: &str,
                 _temperature: f64,
             ) -> anyhow::Result<String> {
-                // Return XML tool call that will be unique each time (different arg value
-                // ensures dedup doesn't shortcircuit first).
-                // Actually for max-iter test we want dedup to NOT kill it — use static call.
-                Ok("<tool_call>{\"name\":\"noop\",\"arguments\":{}}</tool_call>".to_string())
+                Ok(String::new())
+            }
+
+            async fn chat(
+                &self,
+                _request: crate::provider::traits::ChatRequest<'_>,
+                _model: &str,
+                _temperature: f64,
+            ) -> anyhow::Result<crate::provider::traits::ChatResponse> {
+                Ok(crate::provider::traits::ChatResponse {
+                    text: None,
+                    tool_calls: vec![crate::provider::traits::ToolCall {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        name: "noop".into(),
+                        arguments: "{}".into(),
+                    }],
+                    usage: None,
+                    reasoning_content: None,
+                })
             }
         }
 

@@ -1,7 +1,6 @@
 pub mod dispatcher;
 pub mod history;
 pub mod loop_;
-pub mod prompt;
 
 pub use loop_::{AgentEvent, AgentSession, AgentSessionConfig, StopReason};
 
@@ -50,6 +49,12 @@ pub trait Tool: Send + Sync {
             description: self.description().to_string(),
             parameters: self.parameters(),
         }
+    }
+
+    /// Whether this tool has side effects (writes files, runs commands, etc.).
+    /// Non-mutating tools (reads, searches) can be auto-approved and parallelized.
+    fn is_mutating(&self) -> bool {
+        false // safe default: assume read-only
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult>;

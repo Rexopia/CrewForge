@@ -117,6 +117,10 @@ impl crate::agent::Tool for ShellTool {
         })
     }
 
+    fn is_mutating(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let command = extract_command_argument(&args)
             .ok_or_else(|| anyhow::anyhow!("Missing 'command' parameter"))?;
@@ -247,6 +251,12 @@ mod tests {
 
     fn test_runtime() -> Arc<dyn RuntimeAdapter> {
         Arc::new(TokioRuntime)
+    }
+
+    #[test]
+    fn shell_tool_is_mutating() {
+        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
+        assert!(tool.is_mutating());
     }
 
     #[test]
