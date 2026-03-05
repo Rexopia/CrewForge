@@ -78,7 +78,6 @@ pub struct ToolsSection;
 pub struct ShellPolicySection;
 pub struct SafetySection;
 pub struct SkillsSection;
-pub struct MemorySection;
 pub struct WorkspaceSection;
 pub struct DateTimeSection;
 
@@ -215,19 +214,6 @@ impl PromptSection for SkillsSection {
     }
 }
 
-/// Optional section for injecting pre-loaded memory context.
-/// Not included in defaults — memory is accessed via tools instead.
-/// Can be added via `SystemPromptBuilder::add_section()` if needed.
-impl PromptSection for MemorySection {
-    fn name(&self) -> &str {
-        "memory"
-    }
-
-    fn build(&self, _ctx: &PromptContext<'_>) -> Result<String> {
-        Ok(String::new())
-    }
-}
-
 impl PromptSection for WorkspaceSection {
     fn name(&self) -> &str {
         "workspace"
@@ -353,15 +339,6 @@ mod tests {
         let section = IdentitySection;
         let output = section.build(&ctx).unwrap();
         assert!(output.contains("Agent instructions here"));
-    }
-
-    #[test]
-    fn memory_section_empty_when_no_context() {
-        let security = SecurityPolicy::default();
-        let ctx = test_ctx(Path::new("/tmp"), &[], &security);
-        let section = MemorySection;
-        let output = section.build(&ctx).unwrap();
-        assert!(output.is_empty());
     }
 
     #[test]

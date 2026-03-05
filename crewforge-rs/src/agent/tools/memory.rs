@@ -1,5 +1,5 @@
 use crate::agent::ToolResult;
-use crate::agent::context::memory::{FileMemory, Memory, MemoryCategory};
+use crate::agent::context::memory::{FileMemory, MemoryCategory};
 use async_trait::async_trait;
 use std::sync::Arc;
 

@@ -1,7 +1,5 @@
 use anyhow::Result;
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -36,57 +34,6 @@ pub struct MemoryEntry {
     pub score: Option<f64>,
 }
 
-// ── Memory trait ─────────────────────────────────────────────────────────────
-
-#[async_trait]
-pub trait Memory: Send + Sync {
-    fn name(&self) -> &str;
-
-    async fn store(
-        &self,
-        key: &str,
-        content: &str,
-        category: MemoryCategory,
-    ) -> Result<()>;
-
-    async fn recall(
-        &self,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<MemoryEntry>>;
-
-    async fn forget(&self, key: &str) -> Result<bool>;
-
-    async fn count(&self) -> Result<usize>;
-}
-
-// ── NoneMemory (no-op backend) ───────────────────────────────────────────────
-
-pub struct NoneMemory;
-
-#[async_trait]
-impl Memory for NoneMemory {
-    fn name(&self) -> &str {
-        "none"
-    }
-
-    async fn store(&self, _key: &str, _content: &str, _category: MemoryCategory) -> Result<()> {
-        Ok(())
-    }
-
-    async fn recall(&self, _query: &str, _limit: usize) -> Result<Vec<MemoryEntry>> {
-        Ok(vec![])
-    }
-
-    async fn forget(&self, _key: &str) -> Result<bool> {
-        Ok(false)
-    }
-
-    async fn count(&self) -> Result<usize> {
-        Ok(0)
-    }
-}
-
 // ── FileMemory (JSONL file backend) ──────────────────────────────────────────
 
 /// Persistent memory backed by a JSONL file in the workspace.
@@ -105,11 +52,6 @@ impl FileMemory {
         Self {
             path: workspace_dir.join(".crewforge").join("memory.jsonl"),
         }
-    }
-
-    /// Storage path for this memory backend.
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 
     fn read_all(&self) -> Vec<MemoryEntry> {
@@ -131,20 +73,13 @@ impl FileMemory {
         let mut file = std::fs::File::create(&self.path)?;
         for entry in entries {
             let line = serde_json::to_string(entry)?;
-            use std::io::Write as IoWrite;
+            use std::io::Write;
             writeln!(file, "{line}")?;
         }
         Ok(())
     }
-}
 
-#[async_trait]
-impl Memory for FileMemory {
-    fn name(&self) -> &str {
-        "file"
-    }
-
-    async fn store(&self, key: &str, content: &str, category: MemoryCategory) -> Result<()> {
+    pub async fn store(&self, key: &str, content: &str, category: MemoryCategory) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -161,12 +96,12 @@ impl Memory for FileMemory {
             .create(true)
             .append(true)
             .open(&self.path)?;
-        use std::io::Write as IoWrite;
+        use std::io::Write;
         writeln!(file, "{line}")?;
         Ok(())
     }
 
-    async fn recall(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+    pub async fn recall(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
         let entries = self.read_all();
         if entries.is_empty() {
             return Ok(vec![]);
@@ -175,11 +110,10 @@ impl Memory for FileMemory {
         let query_words: Vec<String> = query
             .split_whitespace()
             .map(|w| w.to_lowercase())
-            .filter(|w| w.len() >= 2) // skip single-char noise
+            .filter(|w| w.len() >= 2)
             .collect();
 
         if query_words.is_empty() {
-            // No meaningful query words — return most recent entries.
             let mut recent = entries;
             recent.reverse();
             recent.truncate(limit);
@@ -206,7 +140,7 @@ impl Memory for FileMemory {
         Ok(scored)
     }
 
-    async fn forget(&self, key: &str) -> Result<bool> {
+    pub async fn forget(&self, key: &str) -> Result<bool> {
         let entries = self.read_all();
         let before = entries.len();
         let remaining: Vec<_> = entries.into_iter().filter(|e| e.key != key).collect();
@@ -217,7 +151,7 @@ impl Memory for FileMemory {
         Ok(removed)
     }
 
-    async fn count(&self) -> Result<usize> {
+    pub async fn count(&self) -> Result<usize> {
         Ok(self.read_all().len())
     }
 }
@@ -235,62 +169,6 @@ fn keyword_score(query_words: &[String], key: &str, content: &str) -> f64 {
     matches as f64 / query_words.len() as f64
 }
 
-// ── MemoryLoader ─────────────────────────────────────────────────────────────
-
-pub struct MemoryLoader {
-    limit: usize,
-    min_relevance_score: f64,
-}
-
-impl Default for MemoryLoader {
-    fn default() -> Self {
-        Self {
-            limit: 5,
-            min_relevance_score: 0.3,
-        }
-    }
-}
-
-impl MemoryLoader {
-    pub fn new(limit: usize, min_relevance_score: f64) -> Self {
-        Self {
-            limit: limit.max(1),
-            min_relevance_score,
-        }
-    }
-
-    pub async fn load_context(&self, memory: &dyn Memory, user_message: &str) -> String {
-        let entries = match memory.recall(user_message, self.limit).await {
-            Ok(e) => e,
-            Err(_) => return String::new(),
-        };
-
-        if entries.is_empty() {
-            return String::new();
-        }
-
-        let mut context = String::from("## Memory\n\nRecalled from persistent memory:\n");
-        let mut has_entries = false;
-
-        for entry in &entries {
-            if let Some(score) = entry.score
-                && score < self.min_relevance_score
-            {
-                continue;
-            }
-            let _ = writeln!(context, "- **{}**: {}", entry.key, entry.content);
-            has_entries = true;
-        }
-
-        if !has_entries {
-            return String::new();
-        }
-
-        context.push('\n');
-        context
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,20 +183,6 @@ mod tests {
             "project"
         );
     }
-
-    // ── NoneMemory tests ─────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn none_memory_returns_empty() {
-        let mem = NoneMemory;
-        assert_eq!(mem.name(), "none");
-        assert!(mem.recall("anything", 5).await.unwrap().is_empty());
-        assert_eq!(mem.count().await.unwrap(), 0);
-        assert!(!mem.forget("key").await.unwrap());
-        mem.store("k", "v", MemoryCategory::Core).await.unwrap();
-    }
-
-    // ── FileMemory tests ─────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn file_memory_store_and_recall() {
@@ -364,8 +228,6 @@ mod tests {
 
         assert!(mem.forget("remove").await.unwrap());
         assert_eq!(mem.count().await.unwrap(), 1);
-
-        // Forgetting again returns false.
         assert!(!mem.forget("remove").await.unwrap());
     }
 
@@ -386,7 +248,6 @@ mod tests {
 
         let results = mem.recall("Rust async", 5).await.unwrap();
         assert!(results.len() >= 2);
-        // "rust_async" should score highest (matches both "rust" and "async").
         assert_eq!(results[0].key, "rust_async");
     }
 
@@ -400,7 +261,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Single-char query words are filtered out, so returns recent entries.
         let results = mem.recall("x", 5).await.unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].key, "b", "most recent first");
@@ -410,20 +270,16 @@ mod tests {
     async fn file_memory_persistence() {
         let dir = tempfile::tempdir().unwrap();
 
-        // Store with one instance.
         let mem1 = FileMemory::new(dir.path());
         mem1.store("key1", "value1", MemoryCategory::Core)
             .await
             .unwrap();
 
-        // Read with a fresh instance — data should persist.
         let mem2 = FileMemory::new(dir.path());
         assert_eq!(mem2.count().await.unwrap(), 1);
         let results = mem2.recall("value1", 5).await.unwrap();
         assert_eq!(results[0].key, "key1");
     }
-
-    // ── keyword_score tests ──────────────────────────────────────────────────
 
     #[test]
     fn keyword_score_empty_query() {
@@ -449,42 +305,5 @@ mod tests {
         let words = vec!["java".into()];
         let score = keyword_score(&words, "lang", "I use Rust");
         assert!(score.abs() < f64::EPSILON);
-    }
-
-    // ── MemoryLoader tests ───────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn loader_returns_empty_for_none_memory() {
-        let loader = MemoryLoader::default();
-        let ctx = loader.load_context(&NoneMemory, "hello").await;
-        assert!(ctx.is_empty());
-    }
-
-    #[tokio::test]
-    async fn loader_formats_file_memory_entries() {
-        let dir = tempfile::tempdir().unwrap();
-        let mem = FileMemory::new(dir.path());
-        mem.store("user_pref", "likes Rust", MemoryCategory::Core)
-            .await
-            .unwrap();
-
-        let loader = MemoryLoader::new(5, 0.0);
-        let ctx = loader.load_context(&mem, "Rust programming").await;
-        assert!(ctx.contains("## Memory"));
-        assert!(ctx.contains("**user_pref**"));
-        assert!(ctx.contains("likes Rust"));
-    }
-
-    #[tokio::test]
-    async fn loader_filters_low_score_entries() {
-        let dir = tempfile::tempdir().unwrap();
-        let mem = FileMemory::new(dir.path());
-        mem.store("irrelevant", "something about cats", MemoryCategory::Daily)
-            .await
-            .unwrap();
-
-        let loader = MemoryLoader::new(5, 0.5);
-        let ctx = loader.load_context(&mem, "Rust programming").await;
-        assert!(ctx.is_empty(), "low-score entry should be filtered out");
     }
 }

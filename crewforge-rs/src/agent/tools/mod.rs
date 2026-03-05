@@ -6,6 +6,8 @@ pub mod glob_search;
 pub mod memory;
 pub mod shell;
 pub mod traits;
+pub mod web_fetch;
+pub mod web_search;
 
 pub use content_search::ContentSearchTool;
 pub use file_edit::FileEditTool;
@@ -15,6 +17,8 @@ pub use glob_search::GlobSearchTool;
 pub use memory::{MemoryForgetTool, MemoryRecallTool, MemoryStoreTool};
 pub use shell::ShellTool;
 pub use traits::{RuntimeAdapter, TokioRuntime};
+pub use web_fetch::WebFetchTool;
+pub use web_search::WebSearchTool;
 
 use super::Tool;
 use super::context::memory::FileMemory;
@@ -38,5 +42,7 @@ pub fn default_tools(
         Box::new(MemoryStoreTool::new(mem.clone())),
         Box::new(MemoryRecallTool::new(mem.clone())),
         Box::new(MemoryForgetTool::new(mem)),
+        Box::new(WebSearchTool::new()),
+        Box::new(WebFetchTool::new()),
     ]
 }

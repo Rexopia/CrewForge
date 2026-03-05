@@ -6,11 +6,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::Tool;
-// Memory is accessed via tools (memory_store/memory_recall), not injected into system prompt.
 use super::context::skills::{Skill, load_skills};
 use super::context::{PromptContext, SystemPromptBuilder};
 use super::dispatch::{self, ParsedToolCall, ToolExecutionResult};
 use super::history::{auto_compact_history, to_provider_messages_native, trim_history};
+use super::research::{self, ResearchConfig};
 use super::sandbox::SecurityPolicy;
 use super::scrub::scrub_credentials;
 use crate::provider::traits::{ChatMessage, ChatRequest, ConversationMessage, Provider, ToolSpec};
@@ -45,6 +45,11 @@ pub enum AgentEvent {
         final_text: Option<String>,
         iterations_used: usize,
         stop_reason: StopReason,
+    },
+    ResearchComplete {
+        context_length: usize,
+        tool_call_count: usize,
+        duration_ms: u64,
     },
     Error {
         message: String,
@@ -86,6 +91,7 @@ pub struct AgentSession {
     config: AgentSessionConfig,
     cancelled: Arc<AtomicBool>,
     security: Arc<SecurityPolicy>,
+    research_config: ResearchConfig,
     skills: Vec<Skill>,
     base_system_prompt: String,
     prompt_builder: SystemPromptBuilder,
@@ -111,10 +117,17 @@ impl AgentSession {
             config,
             cancelled: Arc::new(AtomicBool::new(false)),
             security,
+            research_config: ResearchConfig::default(),
             skills,
             base_system_prompt: base_system_prompt.into(),
             prompt_builder: SystemPromptBuilder::with_defaults(),
         }
+    }
+
+    /// Replace the default research config.
+    pub fn with_research_config(mut self, config: ResearchConfig) -> Self {
+        self.research_config = config;
+        self
     }
 
     /// Replace the default prompt builder.
@@ -190,6 +203,38 @@ impl AgentSession {
         )
         .await;
         trim_history(&mut self.history, self.config.max_history_messages);
+
+        // Run research phase if triggered.
+        if research::should_trigger(&self.research_config, initial_message) {
+            match research::run_research_phase(
+                &self.research_config,
+                self.provider.as_ref(),
+                &self.tools,
+                initial_message,
+                &self.model,
+                self.config.temperature,
+            )
+            .await
+            {
+                Ok(result) if !result.context.is_empty() => {
+                    events.push(AgentEvent::ResearchComplete {
+                        context_length: result.context.len(),
+                        tool_call_count: result.tool_call_count,
+                        duration_ms: result.duration.as_millis() as u64,
+                    });
+                    // Inject research findings as context for the main loop.
+                    self.history
+                        .push(ConversationMessage::Chat(ChatMessage::assistant(format!(
+                            "[Research context]\n{}",
+                            result.context
+                        ))));
+                }
+                Ok(_) => {} // Empty research — skip.
+                Err(e) => {
+                    tracing::warn!("Research phase failed: {e}");
+                }
+            }
+        }
 
         let tool_specs: Vec<ToolSpec> = self.tools.iter().map(|t| t.spec()).collect();
         let mut seen_signatures: HashSet<(String, String)> = HashSet::new();

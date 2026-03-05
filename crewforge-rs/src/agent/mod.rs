@@ -2,12 +2,14 @@ pub mod context;
 pub mod dispatch;
 pub mod history;
 pub mod orchestrate;
+pub mod research;
 pub mod sandbox;
 pub mod scrub;
 pub mod testing;
 pub mod tools;
 
 pub use orchestrate::{AgentEvent, AgentSession, AgentSessionConfig, StopReason};
+pub use research::{ResearchConfig, ResearchTrigger};
 
 use crate::provider::traits::ToolSpec;
 use async_trait::async_trait;

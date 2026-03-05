@@ -138,6 +138,16 @@ fn print_event(event: &AgentEvent) {
                 println!("{t}");
             }
         }
+        AgentEvent::ResearchComplete {
+            context_length,
+            tool_call_count,
+            duration_ms,
+        } => {
+            eprintln!(
+                "\x1b[2m[research] {} chars, {} tool call(s), {}ms\x1b[0m",
+                context_length, tool_call_count, duration_ms
+            );
+        }
         AgentEvent::Error { message, fatal } => {
             let label = if *fatal { "fatal error" } else { "error" };
             eprintln!("\x1b[31m[{label}] {message}\x1b[0m");

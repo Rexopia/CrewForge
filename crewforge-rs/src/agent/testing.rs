@@ -283,6 +283,13 @@ fn format_event(event: &AgentEvent) -> String {
                 "TurnFinished(reason={reason}, iters={iterations_used}, text={text_preview:?})"
             )
         }
+        AgentEvent::ResearchComplete {
+            context_length,
+            tool_call_count,
+            duration_ms,
+        } => {
+            format!("ResearchComplete(chars={context_length}, tools={tool_call_count}, ms={duration_ms})")
+        }
         AgentEvent::Error { message, fatal } => {
             let label = if *fatal { "FATAL" } else { "ERROR" };
             format!("{label}: {message}")
