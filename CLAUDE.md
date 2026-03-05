@@ -64,21 +64,24 @@ User → chat.rs → SessionKernel (kernel.rs, JSONL on disk)
 ### `crewforge agent` (native Rust agent REPL)
 
 ```
-agent_cmd.rs → AgentSession (agent/loop_.rs)
-                    └→ dispatcher.rs  (tool dispatch)
-                    └→ history.rs     (conversation memory)
+agent_cmd.rs → AgentSession (agent/orchestrate.rs)
+                    ├→ research.rs    (optional pre-response research phase)
+                    ├→ dispatch.rs    (tool call parsing + result formatting)
+                    ├→ history.rs     (message conversion, trim, auto-compaction)
+                    ├→ scrub.rs       (credential scrubbing)
+                    ├→ tools/         (11 built-in tools)
+                    ├→ context/       (system prompt assembly, memory backend)
+                    ├→ sandbox/       (SecurityPolicy, AutonomyLevel)
                     └→ provider::create_provider()  (Rust provider stack)
 ```
 
 ### Library crate (`crewforge` lib — `src/lib.rs`)
 
-Exports five public modules consumed by other crates/tools:
+Exports three public modules consumed by other crates/tools:
 
-- `crewforge::agent` — `AgentSession`, `AgentSessionConfig`, `Tool` trait, `ToolResult`, events
+- `crewforge::agent` — `AgentSession`, `AgentSessionConfig`, `Tool` trait, `ToolResult`, `ResearchConfig`, events
 - `crewforge::auth` — `AuthService`, `default_state_dir()`, OAuth flows
 - `crewforge::provider` — `create_provider()`, `Provider` trait, `ProviderRegistry`, `ProviderRuntimeOptions`
-- `crewforge::security` — `SecurityPolicy`, `AutonomyLevel`, `SecretStore` (ChaCha20-Poly1305)
-- `crewforge::tools` — `default_tools()`, `RuntimeAdapter`, 6 built-in tools
 
 ### Provider stack (`src/provider/`)
 
@@ -116,9 +119,9 @@ The current `src/` layout will be restructured toward the following target. **Al
 
 ### Agent mental model (three layers)
 
-1. **Core orchestration** — one file owns the full decision chain: check → format → request → parse → dispatch → check. Helper modules for message conversion, codec, scrubbing.
-2. **Basic capabilities** — read/write (fundamental), tools/MCPs (built-in + external), web_search (internet access).
-3. **Extra context** — memory/skills injected as context, not standalone tools. Built-in tools can be used to interact with them.
+1. **Core orchestration** — one file owns the full decision chain: check → format → request → parse → dispatch → check. Helper modules for message conversion, codec, scrubbing. Optional research phase runs a separate LLM+tools loop before the main response.
+2. **Basic capabilities** — read/write (fundamental), tools/MCPs (built-in + external), web_search/web_fetch (internet access).
+3. **Extra context** — static files (CLAUDE.md, AGENTS.md) injected at startup; dynamic memory accessed via built-in tools (memory_store/recall/forget), not system prompt injection. Skills loaded from workspace.
 
 **Sandbox** is an external constraint on the agent (not a capability).
 
@@ -132,18 +135,28 @@ crewforge-rs/src/
 ├── agent/                        # Standalone agent: all self-contained logic
 │   ├── mod.rs                    #   Public API: Tool, ToolResult, AgentSession, AgentEvent
 │   ├── orchestrate.rs            #   Core orchestration loop (single file, all decision flow)
-│   ├── history.rs                #   Helper: message conversion, trim, compact
-│   ├── dispatch.rs               #   Helper: Native/XML codec
-│   ├── scrub.rs                  #   Helper: credential scrubbing
-│   ├── tools/                    #   Built-in tools (shell, file_read/write/edit, glob, content_search)
+│   ├── research.rs               #   Pre-response research phase (configurable triggers)
+│   ├── history.rs                #   Message conversion, trim, auto-compaction via LLM
+│   ├── dispatch.rs               #   Tool call parsing (native format) + result formatting
+│   ├── scrub.rs                  #   Credential scrubbing
+│   ├── testing.rs                #   EventTrace test helper
+│   ├── tools/                    #   11 built-in tools
 │   │   ├── mod.rs                #     default_tools() factory
-│   │   └── traits.rs             #     RuntimeAdapter
+│   │   ├── traits.rs             #     RuntimeAdapter
+│   │   ├── shell.rs              #     Shell command execution
+│   │   ├── file_read/write/edit  #     File operations
+│   │   ├── glob_search.rs        #     Glob pattern search
+│   │   ├── content_search.rs     #     Content grep search
+│   │   ├── memory.rs             #     memory_store / memory_recall / memory_forget
+│   │   ├── web_search.rs         #     Brave Search API (requires BRAVE_API_KEY)
+│   │   └── web_fetch.rs          #     URL fetch + HTML→Markdown (html2md, SSRF protection)
 │   ├── sandbox/                  #   Security policy + approval
 │   │   ├── mod.rs
-│   │   ├── policy.rs             #     SecurityPolicy (path ACL, command allowlist, rate-limit)
-│   │   └── autonomy.rs           #     AutonomyLevel
-│   └── context/                  #   Placeholder for memory (S3), skills (S5)
-│       └── mod.rs
+│   │   └── policy.rs             #     SecurityPolicy (path ACL, command allowlist, rate-limit)
+│   └── context/                  #   System prompt assembly
+│       ├── mod.rs                #     PromptSection trait, SystemPromptBuilder, 6 sections
+│       ├── memory.rs             #     FileMemory (JSONL backend for memory tools)
+│       └── skills.rs             #     Skill loading from workspace
 │
 ├── provider/                     # LLM backends: Provider trait + 16 implementations
 │   ├── mod.rs                    #   create_provider() factory
@@ -188,6 +201,9 @@ launcher ──→ agent ──→ provider
 - **orchestrator/ stays in binary crate** — currently spawns opencode subprocesses, not Rust AgentSession. Will be refactored to use agent/ directly once agent is robust enough to replace opencode.
 - **launcher/ and tui/ stay in binary crate** — keeps library crate free of CLI dependencies (clap, crossterm, ratatui).
 - **provider/ types (ChatMessage, ToolSpec, etc.) stay in provider/** — agent/ depends on provider/ unidirectionally. If protocol types become too entangled, consider extracting a `types/` module later.
+- **Memory via tools, not prompt injection** — dynamic memory (memory_store/recall/forget) is tool-based. Static project context (CLAUDE.md, AGENTS.md) is injected at startup via IdentitySection. FileMemory uses JSONL at `{workspace}/.crewforge/memory.jsonl`.
+- **Research phase is optional** — configured via `ResearchConfig` (trigger: Question/Always/Keywords/Never). Runs a separate LLM+tools loop before the main response to gather facts. Default trigger: `Question` (messages containing `?`).
+- **Web search requires API key** — `web_search` uses Brave Search API (`BRAVE_API_KEY` env var). Returns a clear error if not configured. `web_fetch` works out of the box with SSRF protection.
 - **Incremental migration** — no big-bang refactor. Develop new code toward this structure; migrate existing code when touching it.
 
 ## Key Patterns and Gotchas
@@ -218,6 +234,7 @@ unsafe {
 - Auth profiles: `~/.crewforge/auth-profiles.json`
 - Provider overrides: `~/.crewforge/providers.toml`
 - Pending OAuth state: `~/.crewforge/auth-{provider}-pending.json`
+- Agent memory: `{workspace}/.crewforge/memory.jsonl` (per-project, JSONL)
 - Room sessions: `.room/sessions/session-<id>.jsonl` (per-project)
 - Room config: `.room/room.json` (per-project)
 
