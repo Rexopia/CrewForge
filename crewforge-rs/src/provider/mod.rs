@@ -1,12 +1,6 @@
-pub mod anthropic;
+pub mod anthropic_oauth;
 pub mod compatible;
-pub mod copilot;
-pub mod gemini;
-pub mod glm;
-pub mod ollama;
-pub mod openai;
-pub mod openai_codex;
-pub mod openrouter;
+pub mod openai_oauth;
 pub mod reliable;
 pub mod router;
 pub mod traits;
@@ -20,9 +14,9 @@ pub use compatible::{api_error, sanitize_api_error};
 pub use reliable::ReliableProvider;
 pub use router::{Route, RouterProvider};
 
-use compatible::{AuthStyle, OpenAiCompatibleProvider};
+use compatible::OpenAiCompatibleProvider;
 
-/// Runtime options for providers that use OAuth/auth services (copilot, openai-codex).
+/// Runtime options for providers that use OAuth/auth services (anthropic, openai-codex).
 #[derive(Debug, Default)]
 pub struct ProviderRuntimeOptions {
     pub crewforge_dir: Option<std::path::PathBuf>,
@@ -41,73 +35,68 @@ pub fn create_provider(
 ) -> anyhow::Result<Box<dyn Provider>> {
     let resolved_key = resolve_api_key(provider_name, api_key);
     let p: Box<dyn Provider> = match provider_name.to_lowercase().as_str() {
-        "anthropic" | "claude" => Box::new(anthropic::AnthropicProvider::with_base_url(
+        "anthropic" | "claude" => {
+            let opts = ProviderRuntimeOptions {
+                provider_api_url: base_url.map(ToString::to_string),
+                ..ProviderRuntimeOptions::default()
+            };
+            Box::new(
+                anthropic_oauth::AnthropicOAuthProvider::new(&opts, resolved_key.as_deref())
+                    .map_err(|e| anyhow::anyhow!("Failed to create Anthropic provider: {e}"))?,
+            )
+        }
+        "openai" | "gpt" => Box::new(OpenAiCompatibleProvider::new(
+            "openai",
+            base_url.unwrap_or("https://api.openai.com/v1"),
             resolved_key.as_deref(),
-            base_url,
         )),
-        "openai" | "gpt" => Box::new(openai::OpenAiProvider::with_base_url(
-            base_url,
+        "openrouter" => Box::new(OpenAiCompatibleProvider::new(
+            "openrouter",
+            base_url.unwrap_or("https://openrouter.ai/api/v1"),
             resolved_key.as_deref(),
         )),
-        "gemini" | "google" => Box::new(gemini::GeminiProvider::new(resolved_key.as_deref())),
-        "ollama" => Box::new(ollama::OllamaProvider::new(
-            base_url,
-            resolved_key.as_deref(),
-        )),
-        "openrouter" => Box::new(openrouter::OpenRouterProvider::new(resolved_key.as_deref())),
-        "glm" | "zhipuai" | "zhipu" => Box::new(glm::GlmProvider::new(resolved_key.as_deref())),
         "moonshot" | "kimi" => Box::new(OpenAiCompatibleProvider::new(
             "moonshot",
             base_url.unwrap_or("https://api.moonshot.ai/v1"),
             resolved_key.as_deref(),
-            AuthStyle::Bearer,
         )),
         "qwen" | "dashscope" => Box::new(OpenAiCompatibleProvider::new(
             "qwen",
             base_url.unwrap_or("https://dashscope.aliyuncs.com/compatible-mode/v1"),
             resolved_key.as_deref(),
-            AuthStyle::Bearer,
         )),
-        "minimax" => Box::new(OpenAiCompatibleProvider::new_merge_system_into_user(
+        "minimax" => Box::new(OpenAiCompatibleProvider::new(
             "minimax",
             base_url.unwrap_or("https://api.minimax.io/v1"),
             resolved_key.as_deref(),
-            AuthStyle::Bearer,
         )),
         "deepseek" => Box::new(OpenAiCompatibleProvider::new(
             "deepseek",
             base_url.unwrap_or("https://api.deepseek.com/v1"),
             resolved_key.as_deref(),
-            AuthStyle::Bearer,
         )),
         "groq" => Box::new(OpenAiCompatibleProvider::new(
             "groq",
             base_url.unwrap_or("https://api.groq.com/openai/v1"),
             resolved_key.as_deref(),
-            AuthStyle::Bearer,
         )),
         "mistral" => Box::new(OpenAiCompatibleProvider::new(
             "mistral",
             base_url.unwrap_or("https://api.mistral.ai/v1"),
             resolved_key.as_deref(),
-            AuthStyle::Bearer,
         )),
         "xai" | "grok" => Box::new(OpenAiCompatibleProvider::new(
             "xai",
             base_url.unwrap_or("https://api.x.ai/v1"),
             resolved_key.as_deref(),
-            AuthStyle::Bearer,
         )),
-        "copilot" | "github-copilot" => {
-            Box::new(copilot::CopilotProvider::new(resolved_key.as_deref()))
-        }
         "openai-codex" | "codex" => {
             let opts = ProviderRuntimeOptions {
                 provider_api_url: base_url.map(ToString::to_string),
                 ..ProviderRuntimeOptions::default()
             };
             Box::new(
-                openai_codex::OpenAiCodexProvider::new(&opts, resolved_key.as_deref())
+                openai_oauth::OpenAiCodexProvider::new(&opts, resolved_key.as_deref())
                     .map_err(|e| anyhow::anyhow!("Failed to create OpenAI Codex provider: {e}"))?,
             )
         }
@@ -117,7 +106,6 @@ pub fn create_provider(
                     other,
                     url,
                     resolved_key.as_deref(),
-                    AuthStyle::Bearer,
                 ))
             } else {
                 anyhow::bail!(
@@ -145,10 +133,7 @@ pub fn default_api_key_env(provider_name: &str) -> Option<&'static str> {
     match provider_name.to_lowercase().as_str() {
         "anthropic" | "claude" => Some("ANTHROPIC_API_KEY"),
         "openai" | "gpt" => Some("OPENAI_API_KEY"),
-        "gemini" | "google" => Some("GEMINI_API_KEY"),
-        "ollama" => None,
         "openrouter" => Some("OPENROUTER_API_KEY"),
-        "glm" | "zhipuai" | "zhipu" => Some("GLM_API_KEY"),
         "moonshot" | "kimi" => Some("MOONSHOT_API_KEY"),
         "qwen" | "dashscope" => Some("QWEN_API_KEY"),
         "minimax" => Some("MINIMAX_API_KEY"),
