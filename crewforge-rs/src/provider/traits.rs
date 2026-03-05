@@ -255,9 +255,10 @@ pub trait Provider: Send + Sync {
             let text = self
                 .chat_with_history(&modified_messages, model, temperature)
                 .await?;
+            let (clean_text, tool_calls) = parse_xml_tool_calls(&text);
             return Ok(ChatResponse {
-                text: Some(text),
-                tool_calls: Vec::new(),
+                text: Some(clean_text),
+                tool_calls,
                 usage: None,
                 reasoning_content: None,
             });
@@ -273,6 +274,80 @@ pub trait Provider: Send + Sync {
             reasoning_content: None,
         })
     }
+}
+
+/// Parse `<tool_call>{"name":"...","arguments":{...}}</tool_call>` tags from text.
+///
+/// Returns the text with tool_call tags removed, and a list of parsed ToolCall structs.
+/// Used by the default `Provider::chat()` implementation for non-native-tool providers.
+pub fn parse_xml_tool_calls(text: &str) -> (String, Vec<ToolCall>) {
+    let mut tool_calls = Vec::new();
+    let mut clean_text = String::new();
+    let mut remaining = text;
+    let mut call_index = 0;
+
+    while let Some(start) = remaining.find("<tool_call>") {
+        // Add text before the tag
+        clean_text.push_str(&remaining[..start]);
+
+        let after_tag = &remaining[start + "<tool_call>".len()..];
+        if let Some(end) = after_tag.find("</tool_call>") {
+            let json_str = after_tag[..end].trim();
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str) {
+                let name = parsed
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let arguments = parsed
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                let arguments_str =
+                    serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".into());
+
+                tool_calls.push(ToolCall {
+                    id: format!("xml_tc_{call_index}"),
+                    name,
+                    arguments: arguments_str,
+                });
+                call_index += 1;
+            }
+            remaining = &after_tag[end + "</tool_call>".len()..];
+        } else {
+            // Malformed: no closing tag, keep the rest as-is
+            clean_text.push_str(&remaining[start..]);
+            remaining = "";
+            break;
+        }
+    }
+
+    clean_text.push_str(remaining);
+
+    // Also strip hallucinated <tool_result> tags that the LLM may emit.
+    let cleaned = strip_tag(&clean_text, "tool_result");
+
+    (cleaned.trim().to_string(), tool_calls)
+}
+
+/// Remove all occurrences of `<tag>...</tag>` from text.
+fn strip_tag(text: &str, tag: &str) -> String {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let mut result = String::new();
+    let mut remaining = text;
+
+    while let Some(start) = remaining.find(&open) {
+        result.push_str(&remaining[..start]);
+        let after = &remaining[start + open.len()..];
+        if let Some(end) = after.find(&close) {
+            remaining = &after[end + close.len()..];
+        } else {
+            remaining = after;
+        }
+    }
+    result.push_str(remaining);
+    result
 }
 
 #[cfg(test)]
@@ -339,5 +414,51 @@ mod tests {
         }]);
         let json = serde_json::to_string(&tool_result).unwrap();
         assert!(json.contains("\"type\":\"ToolResults\""));
+    }
+
+    #[test]
+    fn parse_xml_tool_calls_extracts_single_call() {
+        let text = r#"Let me read the file.
+<tool_call>
+{"name":"file_read","arguments":{"path":"a.txt"}}
+</tool_call>"#;
+        let (clean, calls) = parse_xml_tool_calls(text);
+        assert_eq!(clean, "Let me read the file.");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "file_read");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
+        assert_eq!(args["path"], "a.txt");
+    }
+
+    #[test]
+    fn parse_xml_tool_calls_extracts_multiple_calls() {
+        let text = r#"I'll search both.
+<tool_call>
+{"name":"search","arguments":{"q":"foo"}}
+</tool_call>
+<tool_call>
+{"name":"search","arguments":{"q":"bar"}}
+</tool_call>
+Done."#;
+        let (clean, calls) = parse_xml_tool_calls(text);
+        assert_eq!(calls.len(), 2);
+        assert!(clean.contains("I'll search both."));
+        assert!(clean.contains("Done."));
+    }
+
+    #[test]
+    fn parse_xml_tool_calls_no_tags_passthrough() {
+        let text = "Just plain text, no tools.";
+        let (clean, calls) = parse_xml_tool_calls(text);
+        assert_eq!(clean, text);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn parse_xml_tool_calls_malformed_json_skipped() {
+        let text = "<tool_call>not valid json</tool_call>rest";
+        let (clean, calls) = parse_xml_tool_calls(text);
+        assert!(calls.is_empty());
+        assert_eq!(clean, "rest");
     }
 }

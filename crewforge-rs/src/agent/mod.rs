@@ -4,6 +4,7 @@ pub mod history;
 pub mod orchestrate;
 pub mod sandbox;
 pub mod scrub;
+pub mod testing;
 pub mod tools;
 
 pub use orchestrate::{AgentEvent, AgentSession, AgentSessionConfig, StopReason};
