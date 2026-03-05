@@ -86,7 +86,7 @@ fn secrets_encrypt() -> bool {
     std::env::var("CREWFORGE_SECRETS_ENCRYPT")
         .ok()
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 fn make_auth_service() -> AuthService {

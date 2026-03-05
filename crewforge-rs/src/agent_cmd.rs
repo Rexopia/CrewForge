@@ -156,7 +156,7 @@ pub async fn run(args: AgentArgs) -> Result<()> {
     {
         None // create_provider picks it up from env
     } else {
-        let svc = AuthService::new(&default_state_dir(), false);
+        let svc = AuthService::new(&default_state_dir(), true);
         svc.get_provider_bearer_token(&args.provider, None)
             .await
             .unwrap_or(None)
