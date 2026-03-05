@@ -22,7 +22,6 @@ pub struct PromptContext<'a> {
     pub tools: &'a [Box<dyn Tool>],
     pub skills: &'a [Skill],
     pub security: &'a SecurityPolicy,
-    pub memory_context: &'a str,
     pub base_system_prompt: &'a str,
 }
 
@@ -47,7 +46,6 @@ impl SystemPromptBuilder {
                 Box::new(ShellPolicySection),
                 Box::new(SafetySection),
                 Box::new(SkillsSection),
-                Box::new(MemorySection),
                 Box::new(WorkspaceSection),
                 Box::new(DateTimeSection),
             ],
@@ -217,16 +215,16 @@ impl PromptSection for SkillsSection {
     }
 }
 
+/// Optional section for injecting pre-loaded memory context.
+/// Not included in defaults — memory is accessed via tools instead.
+/// Can be added via `SystemPromptBuilder::add_section()` if needed.
 impl PromptSection for MemorySection {
     fn name(&self) -> &str {
         "memory"
     }
 
-    fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
-        if ctx.memory_context.is_empty() {
-            return Ok(String::new());
-        }
-        Ok(ctx.memory_context.to_string())
+    fn build(&self, _ctx: &PromptContext<'_>) -> Result<String> {
+        Ok(String::new())
     }
 }
 
@@ -304,7 +302,6 @@ mod tests {
             tools,
             skills: &[],
             security,
-            memory_context: "",
             base_system_prompt: "You are a helpful assistant.",
         }
     }
@@ -368,16 +365,6 @@ mod tests {
     }
 
     #[test]
-    fn memory_section_includes_context() {
-        let security = SecurityPolicy::default();
-        let mut ctx = test_ctx(Path::new("/tmp"), &[], &security);
-        ctx.memory_context = "[Memory context]\n- pref: likes Rust\n";
-        let section = MemorySection;
-        let output = section.build(&ctx).unwrap();
-        assert!(output.contains("likes Rust"));
-    }
-
-    #[test]
     fn skills_section_renders() {
         let security = SecurityPolicy::default();
         let skills = vec![Skill {
@@ -391,7 +378,6 @@ mod tests {
             tools: &[],
             skills: &skills,
             security: &security,
-            memory_context: "",
             base_system_prompt: "",
         };
         let section = SkillsSection;

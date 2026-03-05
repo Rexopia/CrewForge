@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::Tool;
-use super::context::memory::{Memory, MemoryLoader, NoneMemory};
+// Memory is accessed via tools (memory_store/memory_recall), not injected into system prompt.
 use super::context::skills::{Skill, load_skills};
 use super::context::{PromptContext, SystemPromptBuilder};
 use super::dispatch::{self, ParsedToolCall, ToolExecutionResult};
@@ -86,8 +86,6 @@ pub struct AgentSession {
     config: AgentSessionConfig,
     cancelled: Arc<AtomicBool>,
     security: Arc<SecurityPolicy>,
-    memory: Arc<dyn Memory>,
-    memory_loader: MemoryLoader,
     skills: Vec<Skill>,
     base_system_prompt: String,
     prompt_builder: SystemPromptBuilder,
@@ -113,18 +111,10 @@ impl AgentSession {
             config,
             cancelled: Arc::new(AtomicBool::new(false)),
             security,
-            memory: Arc::new(NoneMemory),
-            memory_loader: MemoryLoader::default(),
             skills,
             base_system_prompt: base_system_prompt.into(),
             prompt_builder: SystemPromptBuilder::with_defaults(),
         }
-    }
-
-    /// Replace the default memory backend.
-    pub fn with_memory(mut self, memory: Arc<dyn Memory>) -> Self {
-        self.memory = memory;
-        self
     }
 
     /// Replace the default prompt builder.
@@ -144,24 +134,17 @@ impl AgentSession {
     }
 
     /// Build the system prompt via context assembly.
-    async fn build_system_prompt(&self, user_message: &str) -> String {
-        let memory_context = self
-            .memory_loader
-            .load_context(self.memory.as_ref(), user_message)
-            .await;
-
+    fn build_system_prompt(&self) -> String {
         let ctx = PromptContext {
             workspace_dir: &self.security.workspace_dir,
             model_name: &self.model,
             tools: &self.tools,
             skills: &self.skills,
             security: &self.security,
-            memory_context: &memory_context,
             base_system_prompt: &self.base_system_prompt,
         };
 
         self.prompt_builder.build(&ctx).unwrap_or_else(|_| {
-            // Fallback: use base system prompt if builder fails
             self.base_system_prompt.clone()
         })
     }
@@ -175,8 +158,8 @@ impl AgentSession {
     pub async fn run_turn(&mut self, initial_message: &str) -> Vec<AgentEvent> {
         let mut events = Vec::new();
 
-        // Build system prompt with context assembly (memory, skills, etc.)
-        let system_prompt = self.build_system_prompt(initial_message).await;
+        // Build system prompt via context assembly (identity, tools, skills, etc.)
+        let system_prompt = self.build_system_prompt();
 
         // Ensure system prompt is at the front of history (replace if exists).
         match self.history.first() {
