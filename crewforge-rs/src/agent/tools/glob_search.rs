@@ -1,5 +1,5 @@
 use crate::agent::ToolResult;
-use crate::security::SecurityPolicy;
+use crate::agent::sandbox::SecurityPolicy;
 use async_trait::async_trait;
 use std::sync::Arc;
 

@@ -67,12 +67,8 @@ struct RequestMessage {
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 enum RequestContent {
-    Text {
-        content: Option<String>,
-    },
-    Multimodal {
-        content: Vec<ContentPart>,
-    },
+    Text { content: Option<String> },
+    Multimodal { content: Vec<ContentPart> },
 }
 
 #[derive(Debug, Serialize)]
@@ -321,12 +317,12 @@ impl StreamAccumulator {
             .into_iter()
             .filter(|tc| !tc.name.is_empty())
             .map(|tc| {
-                let arguments =
-                    if serde_json::from_str::<serde_json::Value>(&tc.arguments).is_ok() {
-                        tc.arguments
-                    } else {
-                        "{}".to_string()
-                    };
+                let arguments = if serde_json::from_str::<serde_json::Value>(&tc.arguments).is_ok()
+                {
+                    tc.arguments
+                } else {
+                    "{}".to_string()
+                };
                 ProviderToolCall {
                     id: if tc.id.is_empty() {
                         uuid::Uuid::new_v4().to_string()
@@ -429,12 +425,7 @@ impl OpenAiCompatibleProvider {
         Self::with_stream(name, base_url, credential, false)
     }
 
-    pub fn with_stream(
-        name: &str,
-        base_url: &str,
-        credential: Option<&str>,
-        stream: bool,
-    ) -> Self {
+    pub fn with_stream(name: &str, base_url: &str, credential: Option<&str>, stream: bool) -> Self {
         Self {
             name: name.to_string(),
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -455,7 +446,12 @@ impl OpenAiCompatibleProvider {
     /// Only sends the fields when streaming is enabled.
     fn stream_fields(&self) -> (Option<bool>, Option<StreamOptions>) {
         if self.stream {
-            (Some(true), Some(StreamOptions { include_usage: true }))
+            (
+                Some(true),
+                Some(StreamOptions {
+                    include_usage: true,
+                }),
+            )
         } else {
             (None, None)
         }
@@ -1207,7 +1203,10 @@ mod tests {
         let parts =
             parse_content_parts("Look at this [IMAGE:https://example.com/cat.jpg] what is it?");
         assert_eq!(parts.len(), 3);
-        let json: Vec<serde_json::Value> = parts.iter().map(|p| serde_json::to_value(p).unwrap()).collect();
+        let json: Vec<serde_json::Value> = parts
+            .iter()
+            .map(|p| serde_json::to_value(p).unwrap())
+            .collect();
         assert_eq!(json[0]["type"], "text");
         assert_eq!(json[0]["text"], "Look at this ");
         assert_eq!(json[1]["type"], "image_url");
@@ -1332,12 +1331,12 @@ mod tests {
     #[test]
     fn stream_accumulator_text_deltas() {
         let mut accum = StreamAccumulator::default();
-        accum.apply_chunk(serde_json::from_str(
-            r#"{"choices":[{"delta":{"content":"Hello"}}]}"#,
-        ).unwrap());
-        accum.apply_chunk(serde_json::from_str(
-            r#"{"choices":[{"delta":{"content":" world"}}]}"#,
-        ).unwrap());
+        accum.apply_chunk(
+            serde_json::from_str(r#"{"choices":[{"delta":{"content":"Hello"}}]}"#).unwrap(),
+        );
+        accum.apply_chunk(
+            serde_json::from_str(r#"{"choices":[{"delta":{"content":" world"}}]}"#).unwrap(),
+        );
         let (resp, _) = accum.into_response();
         assert_eq!(resp.text.as_deref(), Some("Hello world"));
         assert!(resp.tool_calls.is_empty());
@@ -1385,12 +1384,15 @@ mod tests {
     #[test]
     fn stream_accumulator_usage_from_last_chunk() {
         let mut accum = StreamAccumulator::default();
-        accum.apply_chunk(serde_json::from_str(
-            r#"{"choices":[{"delta":{"content":"hi"}}]}"#,
-        ).unwrap());
-        accum.apply_chunk(serde_json::from_str(
-            r#"{"choices":[{"delta":{}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
-        ).unwrap());
+        accum.apply_chunk(
+            serde_json::from_str(r#"{"choices":[{"delta":{"content":"hi"}}]}"#).unwrap(),
+        );
+        accum.apply_chunk(
+            serde_json::from_str(
+                r#"{"choices":[{"delta":{}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+            )
+            .unwrap(),
+        );
 
         let (resp, usage) = accum.into_response();
         assert_eq!(resp.text.as_deref(), Some("hi"));
@@ -1402,12 +1404,13 @@ mod tests {
     #[test]
     fn stream_accumulator_reasoning_content() {
         let mut accum = StreamAccumulator::default();
-        accum.apply_chunk(serde_json::from_str(
-            r#"{"choices":[{"delta":{"reasoning_content":"thinking"}}]}"#,
-        ).unwrap());
-        accum.apply_chunk(serde_json::from_str(
-            r#"{"choices":[{"delta":{"content":"answer"}}]}"#,
-        ).unwrap());
+        accum.apply_chunk(
+            serde_json::from_str(r#"{"choices":[{"delta":{"reasoning_content":"thinking"}}]}"#)
+                .unwrap(),
+        );
+        accum.apply_chunk(
+            serde_json::from_str(r#"{"choices":[{"delta":{"content":"answer"}}]}"#).unwrap(),
+        );
 
         let (resp, _) = accum.into_response();
         assert_eq!(resp.text.as_deref(), Some("answer"));
@@ -1437,7 +1440,10 @@ mod tests {
     #[test]
     fn with_stream_constructor() {
         let p = OpenAiCompatibleProvider::with_stream(
-            "test", "https://api.example.com/v1", Some("sk-test"), true,
+            "test",
+            "https://api.example.com/v1",
+            Some("sk-test"),
+            true,
         );
         assert!(p.stream);
         assert_eq!(p.credential.as_deref(), Some("sk-test"));

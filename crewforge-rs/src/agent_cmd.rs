@@ -16,11 +16,13 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::Args;
 use crewforge::{
-    agent::{AgentEvent, AgentSession, AgentSessionConfig, StopReason, Tool},
+    agent::{
+        AgentEvent, AgentSession, AgentSessionConfig, StopReason, Tool,
+        sandbox::SecurityPolicy,
+        tools::{TokioRuntime, default_tools},
+    },
     auth::{AuthService, default_state_dir},
     provider::{self, ProviderRegistry},
-    security::SecurityPolicy,
-    tools::{TokioRuntime, default_tools},
 };
 
 // ── Clap args ─────────────────────────────────────────────────────────────────
@@ -169,16 +171,17 @@ pub async fn run(args: AgentArgs) -> Result<()> {
         args.base_url.as_deref(),
     )?);
 
+    let workspace = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    let security = Arc::new(SecurityPolicy {
+        workspace_dir: workspace,
+        ..SecurityPolicy::default()
+    });
+
     let tools: Vec<Box<dyn Tool>> = if args.no_tools {
         vec![]
     } else {
-        let workspace = std::env::current_dir().unwrap_or_else(|_| ".".into());
-        let security = Arc::new(SecurityPolicy {
-            workspace_dir: workspace,
-            ..SecurityPolicy::default()
-        });
         let runtime = Arc::new(TokioRuntime);
-        default_tools(security, runtime)
+        default_tools(security.clone(), runtime)
     };
 
     let config = AgentSessionConfig {
@@ -188,7 +191,8 @@ pub async fn run(args: AgentArgs) -> Result<()> {
     };
 
     let tool_names: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
-    let mut session = AgentSession::new(provider, &args.model, &args.system, tools, config);
+    let mut session =
+        AgentSession::new(provider, &args.model, &args.system, tools, config, security);
 
     eprintln!(
         "\x1b[1mcrewforge agent\x1b[0m  provider={} model={} tools={}",

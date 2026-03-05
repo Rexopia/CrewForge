@@ -190,8 +190,7 @@ async fn run_login(provider: String, profile: String) -> Result<()> {
             println!("Code:  {}", device.user_code);
             println!();
             println!("Waiting for authorization...");
-            let token_set =
-                auth::openai_oauth::poll_device_code_tokens(&client, &device).await?;
+            let token_set = auth::openai_oauth::poll_device_code_tokens(&client, &device).await?;
             let account_id = extract_openai_account_id(&token_set);
             svc.store_openai_tokens(&profile, token_set, account_id, true)
                 .await?;
@@ -205,11 +204,7 @@ async fn run_login(provider: String, profile: String) -> Result<()> {
 
 // ── Paste token ───────────────────────────────────────────────────────────────
 
-async fn run_paste_token(
-    provider: String,
-    profile: String,
-    token: Option<String>,
-) -> Result<()> {
+async fn run_paste_token(provider: String, profile: String, token: Option<String>) -> Result<()> {
     let provider = normalize_provider(&provider)?;
     let token = match token {
         Some(t) => t.trim().to_string(),
@@ -220,8 +215,14 @@ async fn run_paste_token(
     }
 
     let svc = make_auth_service();
-    svc.store_provider_token(&provider, &profile, &token, std::collections::HashMap::new(), true)
-        .await?;
+    svc.store_provider_token(
+        &provider,
+        &profile,
+        &token,
+        std::collections::HashMap::new(),
+        true,
+    )
+    .await?;
     println!("Saved profile {profile}");
     println!("Active profile for {provider}: {profile}");
     Ok(())

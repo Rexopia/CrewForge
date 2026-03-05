@@ -1,7 +1,7 @@
+use super::traits::RuntimeAdapter;
 use crate::agent::ToolResult;
-use crate::security::SecurityPolicy;
-use crate::security::policy::is_valid_env_var_name;
-use crate::tools::traits::RuntimeAdapter;
+use crate::agent::sandbox::SecurityPolicy;
+use crate::agent::sandbox::policy::is_valid_env_var_name;
 use async_trait::async_trait;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -237,8 +237,8 @@ impl crate::agent::Tool for ShellTool {
 mod tests {
     use super::*;
     use crate::agent::Tool;
-    use crate::security::AutonomyLevel;
-    use crate::tools::traits::TokioRuntime;
+    use crate::agent::sandbox::AutonomyLevel;
+    use crate::agent::tools::traits::TokioRuntime;
     use serde_json::json;
 
     fn test_security(autonomy: AutonomyLevel) -> Arc<SecurityPolicy> {

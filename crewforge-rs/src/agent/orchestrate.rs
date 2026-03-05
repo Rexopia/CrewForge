@@ -6,9 +6,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::Tool;
-use super::dispatcher::{self, ParsedToolCall, ToolExecutionResult};
+use super::context::memory::{Memory, MemoryLoader, NoneMemory};
+use super::context::skills::{Skill, load_skills};
+use super::context::{PromptContext, SystemPromptBuilder};
+use super::dispatch::{self, ParsedToolCall, ToolExecutionResult};
 use super::history::{auto_compact_history, to_provider_messages_native, trim_history};
+use super::sandbox::SecurityPolicy;
+use super::scrub::scrub_credentials;
 use crate::provider::traits::{ChatMessage, ChatRequest, ConversationMessage, Provider, ToolSpec};
+
+/// Max tool output bytes stored in history per single tool call.
+/// ~32KB keeps context manageable across models (~8k tokens).
+const MAX_TOOL_OUTPUT_CONTEXT_BYTES: usize = 32_768;
 
 // ── Public event/config/stop types ───────────────────────────────────────────
 
@@ -76,31 +85,52 @@ pub struct AgentSession {
     tools: Arc<Vec<Box<dyn Tool>>>,
     config: AgentSessionConfig,
     cancelled: Arc<AtomicBool>,
+    security: Arc<SecurityPolicy>,
+    memory: Arc<dyn Memory>,
+    memory_loader: MemoryLoader,
+    skills: Vec<Skill>,
+    base_system_prompt: String,
+    prompt_builder: SystemPromptBuilder,
 }
 
 impl AgentSession {
     pub fn new(
         provider: Arc<dyn Provider>,
         model: impl Into<String>,
-        system_prompt: impl Into<String>,
+        base_system_prompt: impl Into<String>,
         tools: Vec<Box<dyn Tool>>,
         config: AgentSessionConfig,
+        security: Arc<SecurityPolicy>,
     ) -> Self {
-        let system_prompt = system_prompt.into();
-        let mut history = Vec::new();
-        if !system_prompt.is_empty() {
-            history.push(ConversationMessage::Chat(ChatMessage::system(
-                system_prompt,
-            )));
-        }
+        let workspace = &security.workspace_dir;
+        let skills = load_skills(workspace);
+
         Self {
             provider,
             model: model.into(),
-            history,
+            history: Vec::new(),
             tools: Arc::new(tools),
             config,
             cancelled: Arc::new(AtomicBool::new(false)),
+            security,
+            memory: Arc::new(NoneMemory),
+            memory_loader: MemoryLoader::default(),
+            skills,
+            base_system_prompt: base_system_prompt.into(),
+            prompt_builder: SystemPromptBuilder::with_defaults(),
         }
+    }
+
+    /// Replace the default memory backend.
+    pub fn with_memory(mut self, memory: Arc<dyn Memory>) -> Self {
+        self.memory = memory;
+        self
+    }
+
+    /// Replace the default prompt builder.
+    pub fn with_prompt_builder(mut self, builder: SystemPromptBuilder) -> Self {
+        self.prompt_builder = builder;
+        self
     }
 
     /// Signal the agent to cancel after the current tool call completes.
@@ -113,6 +143,29 @@ impl AgentSession {
         self.cancelled.clone()
     }
 
+    /// Build the system prompt via context assembly.
+    async fn build_system_prompt(&self, user_message: &str) -> String {
+        let memory_context = self
+            .memory_loader
+            .load_context(self.memory.as_ref(), user_message)
+            .await;
+
+        let ctx = PromptContext {
+            workspace_dir: &self.security.workspace_dir,
+            model_name: &self.model,
+            tools: &self.tools,
+            skills: &self.skills,
+            security: &self.security,
+            memory_context: &memory_context,
+            base_system_prompt: &self.base_system_prompt,
+        };
+
+        self.prompt_builder.build(&ctx).unwrap_or_else(|_| {
+            // Fallback: use base system prompt if builder fails
+            self.base_system_prompt.clone()
+        })
+    }
+
     /// Run one agent turn, collecting all events into a Vec.
     ///
     /// Adds `initial_message` as a user message, runs the tool-use loop, and
@@ -121,6 +174,23 @@ impl AgentSession {
     /// TODO: convert to `Stream<Item = AgentEvent>` for true streaming.
     pub async fn run_turn(&mut self, initial_message: &str) -> Vec<AgentEvent> {
         let mut events = Vec::new();
+
+        // Build system prompt with context assembly (memory, skills, etc.)
+        let system_prompt = self.build_system_prompt(initial_message).await;
+
+        // Ensure system prompt is at the front of history (replace if exists).
+        match self.history.first() {
+            Some(ConversationMessage::Chat(m)) if m.role == "system" => {
+                self.history[0] =
+                    ConversationMessage::Chat(ChatMessage::system(system_prompt));
+            }
+            _ => {
+                self.history.insert(
+                    0,
+                    ConversationMessage::Chat(ChatMessage::system(system_prompt)),
+                );
+            }
+        }
 
         // Add initial user message to history.
         self.history
@@ -190,7 +260,7 @@ impl AgentSession {
             };
 
             // Parse tool calls from the response.
-            let (text, parsed_calls) = dispatcher::parse_response(&response);
+            let (text, parsed_calls) = dispatch::parse_response(&response);
 
             let usage = response.usage.clone();
 
@@ -250,16 +320,10 @@ impl AgentSession {
                 return events;
             }
 
-            // Execute each unique tool call.
-            let mut tool_results: Vec<ToolExecutionResult> = Vec::new();
-            for call in &unique_calls {
-                events.push(AgentEvent::ToolCallStarted {
-                    iteration,
-                    name: call.name.clone(),
-                    args: call.arguments.clone(),
-                });
+            // Execute tool calls — parallel when possible, sequential otherwise.
+            let tool_results = execute_tool_calls(&self.tools, &unique_calls).await;
 
-                let result = execute_tool(&self.tools, call).await;
+            for (call, result) in unique_calls.iter().zip(tool_results.iter()) {
                 let success = result.tool_result.success;
                 let output = if let Some(ref err) = result.tool_result.error {
                     err.clone()
@@ -267,17 +331,27 @@ impl AgentSession {
                     result.tool_result.output.clone()
                 };
 
+                events.push(AgentEvent::ToolCallStarted {
+                    iteration,
+                    name: call.name.clone(),
+                    args: call.arguments.clone(),
+                });
                 events.push(AgentEvent::ToolCallFinished {
                     name: call.name.clone(),
-                    result: scrub_credentials(&output),
+                    result: scrub_credentials(&truncate_tool_output(&output)),
                     success,
                 });
-
-                tool_results.push(result);
             }
 
-            // Store tool results in history.
-            let history_entry = dispatcher::format_results(&tool_results);
+            // Store tool results in history (with context-aware truncation).
+            let truncated_results: Vec<ToolExecutionResult> = tool_results
+                .into_iter()
+                .map(|mut r| {
+                    r.tool_result.output = truncate_tool_output(&r.tool_result.output);
+                    r
+                })
+                .collect();
+            let history_entry = dispatch::format_results(&truncated_results);
             self.history.push(history_entry);
 
             // Check cancellation after each tool batch.
@@ -309,8 +383,63 @@ fn tool_call_signature(name: &str, arguments: &serde_json::Value) -> (String, St
     (name.trim().to_ascii_lowercase(), args_json)
 }
 
+/// Truncate tool output to keep context manageable.
+fn truncate_tool_output(output: &str) -> String {
+    if output.len() <= MAX_TOOL_OUTPUT_CONTEXT_BYTES {
+        return output.to_string();
+    }
+    let mut end = MAX_TOOL_OUTPUT_CONTEXT_BYTES;
+    while end > 0 && !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut truncated = output[..end].to_string();
+    truncated.push_str("\n... [output truncated at 32KB for context management]");
+    truncated
+}
+
+/// Execute tool calls, choosing parallel or sequential based on mutability.
+///
+/// When multiple calls are present and none require approval-gated side effects,
+/// run them concurrently for lower wall-clock latency.
+async fn execute_tool_calls(
+    tools: &[Box<dyn Tool>],
+    calls: &[&ParsedToolCall],
+) -> Vec<ToolExecutionResult> {
+    if calls.len() <= 1 {
+        // Single call — just run it directly.
+        let mut results = Vec::new();
+        for call in calls {
+            results.push(execute_one_tool(tools, call).await);
+        }
+        return results;
+    }
+
+    // Check if any tool is mutating — if so, run all sequentially for safety.
+    let any_mutating = calls.iter().any(|call| {
+        tools
+            .iter()
+            .find(|t| t.name() == call.name)
+            .is_some_and(|t| t.is_mutating())
+    });
+
+    if any_mutating {
+        let mut results = Vec::new();
+        for call in calls {
+            results.push(execute_one_tool(tools, call).await);
+        }
+        results
+    } else {
+        // All read-only — run in parallel.
+        let futures: Vec<_> = calls
+            .iter()
+            .map(|call| execute_one_tool(tools, call))
+            .collect();
+        futures::future::join_all(futures).await
+    }
+}
+
 /// Look up and invoke a tool by name. Returns a `ToolExecutionResult` in all cases.
-async fn execute_tool(tools: &[Box<dyn Tool>], call: &ParsedToolCall) -> ToolExecutionResult {
+async fn execute_one_tool(tools: &[Box<dyn Tool>], call: &ParsedToolCall) -> ToolExecutionResult {
     let tool = tools.iter().find(|t| t.name() == call.name);
     match tool {
         Some(t) => match t.execute(call.arguments.clone()).await {
@@ -341,111 +470,16 @@ async fn execute_tool(tools: &[Box<dyn Tool>], call: &ParsedToolCall) -> ToolExe
     }
 }
 
-/// Redact credential-like key-value pairs from tool output to prevent accidental exfiltration.
-///
-/// Matches patterns such as `token=...`, `api_key: "..."`, `password=...`, etc.
-/// Preserves the first 4 characters of each value for context; redacts the rest.
-pub fn scrub_credentials(input: &str) -> String {
-    use regex::Regex;
-    use std::sync::LazyLock;
-
-    // Matches key=value and key: value forms (token=, api_key:, bearer:, etc.)
-    static SENSITIVE_KV_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(
-            r#"(?i)(token|api[_-]?key|password|secret|user[_-]?key|bearer|credential)["']?\s*[:=]\s*(?:"([^"]{8,})"|'([^']{8,})'|([a-zA-Z0-9_\-\.]{8,}))"#,
-        )
-        .expect("SENSITIVE_KV_REGEX is a valid static pattern")
-    });
-
-    // Matches HTTP Authorization header: "Authorization: Bearer <token>"
-    static AUTH_HEADER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r#"(?i)(Authorization)\s*:\s*(Bearer|Token)\s+([a-zA-Z0-9_\-\.\/\+]{8,})"#)
-            .expect("AUTH_HEADER_REGEX is a valid static pattern")
-    });
-
-    let step1 = SENSITIVE_KV_REGEX
-        .replace_all(input, |caps: &regex::Captures| {
-            let full_match = &caps[0];
-            let key = &caps[1];
-            let val = caps
-                .get(2)
-                .or_else(|| caps.get(3))
-                .or_else(|| caps.get(4))
-                .map(|m| m.as_str())
-                .unwrap_or("");
-            let prefix = if val.len() > 4 { &val[..4] } else { "" };
-            if full_match.contains(':') {
-                if full_match.contains('"') {
-                    format!("\"{}\": \"{}*[REDACTED]\"", key, prefix)
-                } else {
-                    format!("{}: {}*[REDACTED]", key, prefix)
-                }
-            } else if full_match.contains('=') {
-                if full_match.contains('"') {
-                    format!("{}=\"{}*[REDACTED]\"", key, prefix)
-                } else {
-                    format!("{}={}*[REDACTED]", key, prefix)
-                }
-            } else {
-                format!("{}: {}*[REDACTED]", key, prefix)
-            }
-        })
-        .to_string();
-
-    AUTH_HEADER_REGEX
-        .replace_all(&step1, |caps: &regex::Captures| {
-            let header = &caps[1];
-            let scheme = &caps[2];
-            let val = &caps[3];
-            let prefix = if val.len() > 4 { &val[..4] } else { "" };
-            format!("{}: {} {}*[REDACTED]", header, scheme, prefix)
-        })
-        .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
 
-    // ── scrub_credentials tests ───────────────────────────────────────────────
-
-    #[test]
-    fn scrub_credentials_redacts_token_equals() {
-        let input = "token=supersecretvalue123";
-        let output = scrub_credentials(input);
-        assert!(!output.contains("supersecretvalue123"));
-        assert!(output.contains("REDACTED"));
-    }
-
-    #[test]
-    fn scrub_credentials_redacts_api_key_colon() {
-        let input = r#"api_key: "mykey1234""#;
-        let output = scrub_credentials(input);
-        assert!(!output.contains("mykey1234"));
-        assert!(output.contains("REDACTED"));
-    }
-
-    #[test]
-    fn scrub_credentials_preserves_short_values() {
-        // Values shorter than 8 chars should not be redacted.
-        let input = "token=short";
-        let output = scrub_credentials(input);
-        assert_eq!(output, input);
-    }
-
-    #[test]
-    fn scrub_credentials_preserves_unrelated_content() {
-        let input = "hello world, status: ok";
-        assert_eq!(scrub_credentials(input), input);
-    }
-
-    #[test]
-    fn scrub_credentials_redacts_bearer() {
-        let input = "Authorization: bearer eyJhbGciOiJIUzI1NiJ9.payload";
-        let output = scrub_credentials(input);
-        assert!(!output.contains("eyJhbGciOiJIUzI1NiJ9"));
-        assert!(output.contains("REDACTED"));
+    fn test_security() -> Arc<SecurityPolicy> {
+        Arc::new(SecurityPolicy {
+            workspace_dir: std::env::temp_dir(),
+            ..SecurityPolicy::default()
+        })
     }
 
     // ── tool_call_signature tests ─────────────────────────────────────────────
@@ -461,6 +495,22 @@ mod tests {
         let sig1 = tool_call_signature("tool", &serde_json::json!({"a": 1}));
         let sig2 = tool_call_signature("tool", &serde_json::json!({"a": 1}));
         assert_eq!(sig1, sig2);
+    }
+
+    // ── truncate_tool_output tests ───────────────────────────────────────────
+
+    #[test]
+    fn truncate_tool_output_short_passthrough() {
+        let short = "hello world";
+        assert_eq!(truncate_tool_output(short), short);
+    }
+
+    #[test]
+    fn truncate_tool_output_long_truncates() {
+        let long = "x".repeat(MAX_TOOL_OUTPUT_CONTEXT_BYTES + 1000);
+        let result = truncate_tool_output(&long);
+        assert!(result.len() < long.len());
+        assert!(result.contains("[output truncated at 32KB"));
     }
 
     // ── AgentSession unit tests ───────────────────────────────────────────────
@@ -489,11 +539,11 @@ mod tests {
             "You are a test agent.",
             vec![],
             AgentSessionConfig::default(),
+            test_security(),
         );
 
         let events = session.run_turn("hello").await;
 
-        // Should end with TurnFinished(Done).
         assert!(events.iter().any(|e| matches!(
             e,
             AgentEvent::TurnFinished {
@@ -502,7 +552,6 @@ mod tests {
             }
         )));
 
-        // Should have LlmThinking at start.
         assert!(
             events
                 .iter()
@@ -522,6 +571,7 @@ mod tests {
             "sys",
             vec![],
             AgentSessionConfig::default(),
+            test_security(),
         );
 
         session.run_turn("user input").await;
@@ -541,15 +591,13 @@ mod tests {
             "",
             vec![],
             AgentSessionConfig::default(),
+            test_security(),
         );
 
-        // Cancel before calling run_turn.
         session.cancel();
 
         let events = session.run_turn("anything").await;
 
-        // Cancellation check is the first statement in the loop body,
-        // so a pre-cancelled session always produces StopReason::Cancelled.
         assert!(events.iter().any(|e| matches!(
             e,
             AgentEvent::TurnFinished {
@@ -568,6 +616,7 @@ mod tests {
             "",
             vec![],
             AgentSessionConfig::default(),
+            test_security(),
         );
 
         let handle = session.cancel_handle();
@@ -578,7 +627,6 @@ mod tests {
 
     #[tokio::test]
     async fn run_turn_max_iterations() {
-        // Provider that always returns a native tool call so iterations keep running.
         struct LoopProvider;
 
         #[async_trait]
@@ -612,7 +660,6 @@ mod tests {
             }
         }
 
-        // Tool that always succeeds.
         struct NoopTool;
 
         #[async_trait]
@@ -648,11 +695,11 @@ mod tests {
                 max_iterations: 3,
                 ..Default::default()
             },
+            test_security(),
         );
 
         let events = session.run_turn("go").await;
 
-        // Should finish with Done (dedup catches repeating call) or MaxIterations.
         let stop_reason = events.iter().find_map(|e| {
             if let AgentEvent::TurnFinished { stop_reason, .. } = e {
                 Some(stop_reason.clone())
@@ -665,5 +712,38 @@ mod tests {
             stop_reason.unwrap(),
             StopReason::Done | StopReason::MaxIterations
         ));
+    }
+
+    #[tokio::test]
+    async fn run_turn_system_prompt_contains_context_assembly() {
+        let provider = Arc::new(EchoProvider);
+        let mut session = AgentSession::new(
+            provider,
+            "test-model",
+            "Base prompt.",
+            vec![],
+            AgentSessionConfig::default(),
+            test_security(),
+        );
+
+        session.run_turn("hello").await;
+
+        // System prompt should be assembled with sections.
+        let system = session.history.iter().find_map(|m| {
+            if let ConversationMessage::Chat(msg) = m
+                && msg.role == "system"
+            {
+                Some(msg.content.clone())
+            } else {
+                None
+            }
+        });
+        let system = system.expect("should have system message");
+        assert!(system.contains("Base prompt."), "should contain base prompt");
+        assert!(system.contains("## Safety"), "should contain safety section");
+        assert!(
+            system.contains("## Workspace"),
+            "should contain workspace section"
+        );
     }
 }

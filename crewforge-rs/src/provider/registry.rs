@@ -142,8 +142,7 @@ impl ProviderRegistry {
 
     /// Get the API key env var for a provider (by name or alias).
     pub fn api_key_env(&self, name: &str) -> Option<&str> {
-        self.lookup(name)
-            .and_then(|def| def.api_key_env.as_deref())
+        self.lookup(name).and_then(|def| def.api_key_env.as_deref())
     }
 
     /// Iterate all provider names (canonical only, not aliases).

@@ -321,8 +321,7 @@ mod tests {
                 "chatgpt_account_id": "nested_789"
             }
         });
-        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(claims.to_string());
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string());
         let token = format!("{header}.{payload}.sig");
 
         let account = extract_account_id_from_jwt(&token);
@@ -335,8 +334,7 @@ mod tests {
         let claims = serde_json::json!({
             "organizations": [{"id": "org_001"}]
         });
-        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(claims.to_string());
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string());
         let token = format!("{header}.{payload}.sig");
 
         let account = extract_account_id_from_jwt(&token);

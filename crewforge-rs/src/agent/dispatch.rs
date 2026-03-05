@@ -42,7 +42,10 @@ pub fn format_results(results: &[ToolExecutionResult]) -> ConversationMessage {
     let messages: Vec<ToolResultMessage> = results
         .iter()
         .map(|result| {
-            let content = match (&result.tool_result.error, result.tool_result.output.is_empty()) {
+            let content = match (
+                &result.tool_result.error,
+                result.tool_result.output.is_empty(),
+            ) {
                 (Some(err), true) => err.clone(),
                 (Some(err), false) => format!("{}\n{}", result.tool_result.output, err),
                 (None, _) => result.tool_result.output.clone(),

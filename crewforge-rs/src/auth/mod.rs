@@ -1,5 +1,8 @@
 pub mod openai_oauth;
 pub mod profiles;
+pub mod secrets;
+
+pub use secrets::SecretStore;
 
 use crate::auth::openai_oauth::refresh_access_token;
 use crate::auth::profiles::{
@@ -219,7 +222,6 @@ impl AuthService {
 
         Ok(updated.token_set.map(|t| t.access_token))
     }
-
 }
 
 pub fn normalize_provider(provider: &str) -> Result<String> {

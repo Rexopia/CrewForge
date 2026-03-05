@@ -1,5 +1,5 @@
 use crate::agent::ToolResult;
-use crate::security::SecurityPolicy;
+use crate::agent::sandbox::SecurityPolicy;
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -162,7 +162,7 @@ impl crate::agent::Tool for FileReadTool {
 mod tests {
     use super::*;
     use crate::agent::Tool;
-    use crate::security::AutonomyLevel;
+    use crate::agent::sandbox::AutonomyLevel;
     use serde_json::json;
 
     fn test_security(workspace: std::path::PathBuf) -> Arc<SecurityPolicy> {

@@ -273,7 +273,6 @@ pub trait Provider: Send + Sync {
             reasoning_content: None,
         })
     }
-
 }
 
 #[cfg(test)]

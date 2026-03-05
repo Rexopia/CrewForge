@@ -14,8 +14,8 @@ pub use glob_search::GlobSearchTool;
 pub use shell::ShellTool;
 pub use traits::{RuntimeAdapter, TokioRuntime};
 
-use crate::agent::Tool;
-use crate::security::SecurityPolicy;
+use super::Tool;
+use super::sandbox::SecurityPolicy;
 use std::sync::Arc;
 
 /// All built-in tools backed by SecurityPolicy.

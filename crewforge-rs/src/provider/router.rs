@@ -391,5 +391,4 @@ mod tests {
         assert_eq!(result, "response");
         assert_eq!(mock.call_count(), 1);
     }
-
 }

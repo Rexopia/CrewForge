@@ -89,4 +89,3 @@ fn resolve_api_key(
     let env_var = registry.api_key_env(provider_name)?;
     std::env::var(env_var).ok().filter(|k| !k.is_empty())
 }
-

@@ -1,4 +1,4 @@
-use crate::security::SecretStore;
+use super::secrets::SecretStore;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

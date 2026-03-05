@@ -1,8 +1,12 @@
-pub mod dispatcher;
+pub mod context;
+pub mod dispatch;
 pub mod history;
-pub mod loop_;
+pub mod orchestrate;
+pub mod sandbox;
+pub mod scrub;
+pub mod tools;
 
-pub use loop_::{AgentEvent, AgentSession, AgentSessionConfig, StopReason};
+pub use orchestrate::{AgentEvent, AgentSession, AgentSessionConfig, StopReason};
 
 use crate::provider::traits::ToolSpec;
 use async_trait::async_trait;
