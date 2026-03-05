@@ -76,7 +76,7 @@ Exports five public modules consumed by other crates/tools:
 
 - `crewforge::agent` — `AgentSession`, `AgentSessionConfig`, `Tool` trait, `ToolResult`, events
 - `crewforge::auth` — `AuthService`, `default_state_dir()`, OAuth flows
-- `crewforge::provider` — `create_provider()`, `Provider` trait, `ProviderRuntimeOptions`
+- `crewforge::provider` — `create_provider()`, `Provider` trait, `ProviderRegistry`, `ProviderRuntimeOptions`
 - `crewforge::security` — `SecurityPolicy`, `AutonomyLevel`, `SecretStore` (ChaCha20-Poly1305)
 - `crewforge::tools` — `default_tools()`, `RuntimeAdapter`, 6 built-in tools
 
@@ -85,16 +85,17 @@ Exports five public modules consumed by other crates/tools:
 | File | Purpose |
 |------|---------|
 | `traits.rs` | `Provider` trait, `ChatMessage`, `ToolSpec`, etc. |
-| `compatible.rs` | `OpenAiCompatibleProvider` base for most APIs |
+| `registry.rs` | Data-driven provider registry (built-in defaults + user TOML overrides) |
+| `compatible.rs` | `OpenAiCompatibleProvider` — all OpenAI-compatible APIs (streaming, vision, native tools) |
 | `reliable.rs` | Retry wrapper (`ReliableProvider`) |
 | `router.rs` | Round-robin `RouterProvider` |
 | `mod.rs` | `create_provider()` factory, `ProviderRuntimeOptions` |
 
-Factory aliases: `"anthropic"/"claude"`, `"openai"/"gpt"`, `"gemini"/"google"`, `"ollama"`, `"openrouter"`, `"glm"/"zhipuai"`, `"moonshot"/"kimi"`, `"qwen"`, `"minimax"`, `"deepseek"`, `"groq"`, `"mistral"`, `"xai"`, `"copilot"/"github-copilot"`, `"openai-codex"/"codex"`.
+Built-in registry providers (all OpenAI-compatible): `openai`/`gpt`, `gemini`/`google`, `openrouter`, `deepseek`, `groq`, `mistral`, `xai`/`grok`, `moonshot`/`kimi`, `qwen`/`dashscope`, `minimax`. Special case: `openai-codex`/`codex` (OAuth). Users can add custom providers via `~/.crewforge/providers.toml`. Anthropic is **not** included (native API is not OpenAI-compatible).
 
 ### Auth system (`src/auth/`)
 
-Persistent profiles at `~/.crewforge/auth-profiles.json`. Optional ChaCha20 encryption via `CREWFORGE_SECRETS_ENCRYPT=1`.
+Persistent profiles at `~/.crewforge/auth-profiles.json`. ChaCha20-Poly1305 encryption enabled by default (opt out via `CREWFORGE_SECRETS_ENCRYPT=0`).
 
 Token resolution priority in `crewforge agent`: `--api-key` flag → env var (e.g. `ANTHROPIC_API_KEY`) → auth profile lookup.
 
@@ -215,15 +216,19 @@ unsafe {
 ### Session storage
 - Global profiles: `~/.crewforge/profiles.json`
 - Auth profiles: `~/.crewforge/auth-profiles.json`
+- Provider overrides: `~/.crewforge/providers.toml`
 - Pending OAuth state: `~/.crewforge/auth-{provider}-pending.json`
 - Room sessions: `.room/sessions/session-<id>.jsonl` (per-project)
 - Room config: `.room/room.json` (per-project)
 
 ### Adding a provider
+
+**OpenAI-compatible providers** (most cases): add an entry to the builtin table in `src/provider/registry.rs`, or let users add via `~/.crewforge/providers.toml`. No code changes needed.
+
+**Non-standard providers** (custom auth, different API shape):
 1. Implement `Provider` trait in `src/provider/<name>.rs`
 2. Add `pub mod <name>;` in `src/provider/mod.rs`
-3. Add match arm to `create_provider()` factory
-4. Add env var name to `default_api_key_env()` if applicable
+3. Add special-case branch in `create_provider()`
 
 ## Release Process
 
