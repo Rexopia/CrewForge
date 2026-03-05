@@ -1,5 +1,4 @@
 use crate::auth::AuthService;
-use crate::auth::anthropic_token::{AnthropicAuthKind, detect_auth_kind};
 use crate::provider::ProviderRuntimeOptions;
 use crate::provider::traits::{
     ChatMessage, ChatRequest as ProviderChatRequest, ChatResponse as ProviderChatResponse,
@@ -19,8 +18,6 @@ pub struct AnthropicOAuthProvider {
     auth: AuthService,
     auth_profile_override: Option<String>,
     base_url: String,
-    /// Explicit API key passed via --api-key or env var (bypasses AuthService).
-    api_key: Option<String>,
     client: Client,
 }
 
@@ -104,7 +101,7 @@ struct AnthropicUsage {
 // ── Provider implementation ──────────────────────────────────────────────────
 
 impl AnthropicOAuthProvider {
-    pub fn new(options: &ProviderRuntimeOptions, api_key: Option<&str>) -> anyhow::Result<Self> {
+    pub fn new(options: &ProviderRuntimeOptions) -> anyhow::Result<Self> {
         let state_dir = options
             .crewforge_dir
             .clone()
@@ -121,10 +118,6 @@ impl AnthropicOAuthProvider {
             auth,
             auth_profile_override: options.auth_profile_override.clone(),
             base_url,
-            api_key: api_key
-                .map(str::trim)
-                .filter(|k| !k.is_empty())
-                .map(ToString::to_string),
             client: Client::builder()
                 .timeout(std::time::Duration::from_secs(120))
                 .connect_timeout(std::time::Duration::from_secs(10))
@@ -133,39 +126,16 @@ impl AnthropicOAuthProvider {
         })
     }
 
-    /// Resolve credential: explicit api_key → AuthService profile.
+    /// Resolve OAuth credential from AuthService.
     async fn resolve_credential(&self) -> anyhow::Result<String> {
-        if let Some(key) = &self.api_key {
-            return Ok(key.clone());
-        }
         self.auth
             .get_provider_bearer_token("anthropic", self.auth_profile_override.as_deref())
             .await?
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Anthropic credentials not found. Set ANTHROPIC_API_KEY or run `crewforge auth paste-token --provider anthropic`."
+                    "Anthropic OAuth credentials not found. Run `crewforge auth login --provider anthropic`."
                 )
             })
-    }
-
-    /// Apply auth headers based on token kind.
-    fn apply_auth(
-        &self,
-        mut req: reqwest::RequestBuilder,
-        credential: &str,
-    ) -> reqwest::RequestBuilder {
-        let kind = detect_auth_kind(credential, None);
-        match kind {
-            AnthropicAuthKind::Authorization => {
-                req = req
-                    .header("Authorization", format!("Bearer {credential}"))
-                    .header("anthropic-beta", ANTHROPIC_OAUTH_BETA);
-            }
-            AnthropicAuthKind::ApiKey => {
-                req = req.header("x-api-key", credential);
-            }
-        }
-        req
     }
 
     async fn send_messages(
@@ -174,14 +144,14 @@ impl AnthropicOAuthProvider {
     ) -> anyhow::Result<MessagesResponse> {
         let credential = self.resolve_credential().await?;
 
-        let mut req = self
+        let req = self
             .client
             .post(format!("{}/v1/messages", self.base_url))
             .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("anthropic-beta", ANTHROPIC_OAUTH_BETA)
+            .header("Authorization", format!("Bearer {credential}"))
             .header("content-type", "application/json")
             .json(request);
-
-        req = self.apply_auth(req, &credential);
 
         let response = req.send().await?;
         if !response.status().is_success() {
@@ -542,17 +512,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_credential_uses_explicit_key() {
-        let opts = ProviderRuntimeOptions::default();
-        let provider = AnthropicOAuthProvider::new(&opts, Some("sk-ant-api-test")).unwrap();
-        let cred = provider.resolve_credential().await.unwrap();
-        assert_eq!(cred, "sk-ant-api-test");
+    async fn resolve_credential_returns_error_without_profile() {
+        let opts = ProviderRuntimeOptions {
+            crewforge_dir: Some(std::env::temp_dir().join("crewforge-test-no-profile")),
+            ..ProviderRuntimeOptions::default()
+        };
+        let provider = AnthropicOAuthProvider::new(&opts).unwrap();
+        let result = provider.resolve_credential().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("OAuth"));
     }
 
     #[test]
     fn capabilities_reports_native_tools() {
         let opts = ProviderRuntimeOptions::default();
-        let provider = AnthropicOAuthProvider::new(&opts, None).unwrap();
+        let provider = AnthropicOAuthProvider::new(&opts).unwrap();
         let caps = provider.capabilities();
         assert!(caps.native_tool_calling);
         assert!(!caps.vision);

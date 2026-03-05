@@ -1023,11 +1023,13 @@ mod tests {
     #[test]
     fn resolved_path_inside_workspace() {
         let dir = tempfile::tempdir().unwrap();
+        // canonicalize to resolve macOS /var → /private/var symlink
+        let canonical_dir = dir.path().canonicalize().unwrap();
         let p = SecurityPolicy {
-            workspace_dir: dir.path().to_path_buf(),
+            workspace_dir: canonical_dir.clone(),
             ..SecurityPolicy::default()
         };
-        let inside = dir.path().join("src/main.rs");
+        let inside = canonical_dir.join("src/main.rs");
         assert!(p.is_resolved_path_allowed(&inside));
     }
 
@@ -1045,12 +1047,15 @@ mod tests {
     fn resolved_path_allowed_roots() {
         let dir = tempfile::tempdir().unwrap();
         let extra = tempfile::tempdir().unwrap();
+        // canonicalize to resolve macOS /var → /private/var symlink
+        let canonical_dir = dir.path().canonicalize().unwrap();
+        let canonical_extra = extra.path().canonicalize().unwrap();
         let p = SecurityPolicy {
-            workspace_dir: dir.path().to_path_buf(),
-            allowed_roots: vec![extra.path().to_path_buf()],
+            workspace_dir: canonical_dir,
+            allowed_roots: vec![canonical_extra.clone()],
             ..SecurityPolicy::default()
         };
-        let inside_extra = extra.path().join("file.txt");
+        let inside_extra = canonical_extra.join("file.txt");
         assert!(p.is_resolved_path_allowed(&inside_extra));
     }
 

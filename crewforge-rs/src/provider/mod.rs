@@ -41,7 +41,7 @@ pub fn create_provider(
                 ..ProviderRuntimeOptions::default()
             };
             Box::new(
-                anthropic_oauth::AnthropicOAuthProvider::new(&opts, resolved_key.as_deref())
+                anthropic_oauth::AnthropicOAuthProvider::new(&opts)
                     .map_err(|e| anyhow::anyhow!("Failed to create Anthropic provider: {e}"))?,
             )
         }
@@ -96,7 +96,7 @@ pub fn create_provider(
                 ..ProviderRuntimeOptions::default()
             };
             Box::new(
-                openai_oauth::OpenAiCodexProvider::new(&opts, resolved_key.as_deref())
+                openai_oauth::OpenAiCodexProvider::new(&opts)
                     .map_err(|e| anyhow::anyhow!("Failed to create OpenAI Codex provider: {e}"))?,
             )
         }
@@ -131,7 +131,6 @@ fn resolve_api_key(provider_name: &str, explicit: Option<&str>) -> Option<String
 /// Default environment variable name for a provider's API key.
 pub fn default_api_key_env(provider_name: &str) -> Option<&'static str> {
     match provider_name.to_lowercase().as_str() {
-        "anthropic" | "claude" => Some("ANTHROPIC_API_KEY"),
         "openai" | "gpt" => Some("OPENAI_API_KEY"),
         "openrouter" => Some("OPENROUTER_API_KEY"),
         "moonshot" | "kimi" => Some("MOONSHOT_API_KEY"),

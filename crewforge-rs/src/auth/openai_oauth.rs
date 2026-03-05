@@ -1,35 +1,27 @@
-use crate::auth::oauth_common::{parse_query_params, url_encode};
-
 use crate::auth::profiles::TokenSet;
 use anyhow::{Context, Result};
 use base64::Engine;
 use chrono::Utc;
 use reqwest::Client;
 use serde::Deserialize;
-use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
-
-// Re-export for external use
-#[allow(unused_imports)]
-pub use crate::auth::oauth_common::{PkceState, generate_pkce_state};
+use std::time::Duration;
 
 pub const OPENAI_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-pub const OPENAI_OAUTH_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
-pub const OPENAI_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
-pub const OPENAI_OAUTH_DEVICE_CODE_URL: &str = "https://auth.openai.com/oauth/device/code";
-pub const OPENAI_OAUTH_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
+const OPENAI_ISSUER: &str = "https://auth.openai.com";
+const OPENAI_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 
+/// Version string for User-Agent header.
+const CREWFORGE_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Polling safety margin added to device auth interval.
+const DEVICE_AUTH_POLLING_MARGIN_MS: u64 = 3000;
+
+/// Result of the device auth initiation step.
 #[derive(Debug, Clone)]
 pub struct DeviceCodeStart {
-    pub device_code: String,
+    pub device_auth_id: String,
     pub user_code: String,
     pub verification_uri: String,
-    pub verification_uri_complete: Option<String>,
-    pub expires_in: u64,
-    pub interval: u64,
-    pub message: Option<String>,
+    pub interval_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,68 +39,30 @@ struct TokenResponse {
     scope: Option<String>,
 }
 
+/// Response from OpenAI's custom device auth usercode endpoint.
 #[derive(Debug, Deserialize)]
-struct DeviceCodeResponse {
-    device_code: String,
+struct DeviceAuthUserCodeResponse {
+    device_auth_id: String,
     user_code: String,
-    verification_uri: String,
     #[serde(default)]
-    verification_uri_complete: Option<String>,
-    expires_in: u64,
-    #[serde(default)]
-    interval: Option<u64>,
-    #[serde(default)]
-    message: Option<String>,
+    interval: Option<String>,
 }
 
+/// Response from OpenAI's custom device auth token endpoint.
 #[derive(Debug, Deserialize)]
-struct OAuthErrorResponse {
-    error: String,
-    #[serde(default)]
-    error_description: Option<String>,
+struct DeviceAuthTokenResponse {
+    authorization_code: String,
+    code_verifier: String,
 }
 
-pub fn build_authorize_url(pkce: &PkceState) -> String {
-    let mut params = BTreeMap::new();
-    params.insert("response_type", "code");
-    params.insert("client_id", OPENAI_OAUTH_CLIENT_ID);
-    params.insert("redirect_uri", OPENAI_OAUTH_REDIRECT_URI);
-    params.insert("scope", "openid profile email offline_access");
-    params.insert("code_challenge", pkce.code_challenge.as_str());
-    params.insert("code_challenge_method", "S256");
-    params.insert("state", pkce.state.as_str());
-    params.insert("codex_cli_simplified_flow", "true");
-    params.insert("id_token_add_organizations", "true");
-
-    let mut encoded: Vec<String> = Vec::with_capacity(params.len());
-    for (k, v) in params {
-        encoded.push(format!("{}={}", url_encode(k), url_encode(v)));
-    }
-
-    format!("{OPENAI_OAUTH_AUTHORIZE_URL}?{}", encoded.join("&"))
-}
-
-pub async fn exchange_code_for_tokens(
-    client: &Client,
-    code: &str,
-    pkce: &PkceState,
-) -> Result<TokenSet> {
-    let form = [
-        ("grant_type", "authorization_code"),
-        ("code", code),
-        ("client_id", OPENAI_OAUTH_CLIENT_ID),
-        ("redirect_uri", OPENAI_OAUTH_REDIRECT_URI),
-        ("code_verifier", pkce.code_verifier.as_str()),
-    ];
-
-    let response = client
-        .post(OPENAI_OAUTH_TOKEN_URL)
-        .form(&form)
-        .send()
-        .await
-        .context("Failed to exchange OpenAI OAuth authorization code")?;
-
-    parse_token_response(response).await
+fn user_agent() -> String {
+    format!(
+        "crewforge/{} ({} {}; {})",
+        CREWFORGE_VERSION,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        std::env::consts::FAMILY,
+    )
 }
 
 pub async fn refresh_access_token(client: &Client, refresh_token: &str) -> Result<TokenSet> {
@@ -128,211 +82,176 @@ pub async fn refresh_access_token(client: &Client, refresh_token: &str) -> Resul
     parse_token_response(response).await
 }
 
+/// Start OpenAI's custom device auth flow (not RFC 8628).
+///
+/// Uses `/api/accounts/deviceauth/usercode` which returns a user code
+/// that the user enters at `https://auth.openai.com/codex/device`.
 pub async fn start_device_code_flow(client: &Client) -> Result<DeviceCodeStart> {
-    let form = [
-        ("client_id", OPENAI_OAUTH_CLIENT_ID),
-        ("scope", "openid profile email offline_access"),
-    ];
+    let body = serde_json::json!({ "client_id": OPENAI_OAUTH_CLIENT_ID });
 
     let response = client
-        .post(OPENAI_OAUTH_DEVICE_CODE_URL)
-        .form(&form)
+        .post(format!("{OPENAI_ISSUER}/api/accounts/deviceauth/usercode"))
+        .header("Content-Type", "application/json")
+        .header("User-Agent", user_agent())
+        .json(&body)
         .send()
         .await
-        .context("Failed to start OpenAI OAuth device-code flow")?;
+        .context("Failed to start OpenAI device authorization")?;
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("OpenAI device-code start failed ({status}): {body}");
+        anyhow::bail!("OpenAI device auth start failed ({status}): {body}");
     }
 
-    let parsed: DeviceCodeResponse = response
+    let parsed: DeviceAuthUserCodeResponse = response
         .json()
         .await
-        .context("Failed to parse OpenAI device-code response")?;
+        .context("Failed to parse OpenAI device auth response")?;
+
+    let interval_secs = parsed
+        .interval
+        .as_deref()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(5)
+        .max(1);
 
     Ok(DeviceCodeStart {
-        device_code: parsed.device_code,
+        device_auth_id: parsed.device_auth_id,
         user_code: parsed.user_code,
-        verification_uri: parsed.verification_uri,
-        verification_uri_complete: parsed.verification_uri_complete,
-        expires_in: parsed.expires_in,
-        interval: parsed.interval.unwrap_or(5).max(1),
-        message: parsed.message,
+        verification_uri: format!("{OPENAI_ISSUER}/codex/device"),
+        interval_ms: interval_secs * 1000 + DEVICE_AUTH_POLLING_MARGIN_MS,
     })
 }
 
+/// Poll OpenAI's custom device auth token endpoint until the user authorizes.
+///
+/// On success, exchanges the returned authorization_code for OAuth tokens
+/// via the standard token endpoint.
 pub async fn poll_device_code_tokens(
     client: &Client,
     device: &DeviceCodeStart,
 ) -> Result<TokenSet> {
-    let started = Instant::now();
-    let mut interval_secs = device.interval.max(1);
+    let timeout = Duration::from_secs(5 * 60);
+    let started = std::time::Instant::now();
 
     loop {
-        if started.elapsed() > Duration::from_secs(device.expires_in) {
-            anyhow::bail!("Device-code flow timed out before authorization completed");
+        if started.elapsed() > timeout {
+            anyhow::bail!("Device authorization timed out (5 minutes)");
         }
 
-        tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+        tokio::time::sleep(Duration::from_millis(device.interval_ms)).await;
 
-        let form = [
-            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-            ("device_code", device.device_code.as_str()),
-            ("client_id", OPENAI_OAUTH_CLIENT_ID),
-        ];
+        let body = serde_json::json!({
+            "device_auth_id": device.device_auth_id,
+            "user_code": device.user_code,
+        });
 
         let response = client
-            .post(OPENAI_OAUTH_TOKEN_URL)
-            .form(&form)
+            .post(format!("{OPENAI_ISSUER}/api/accounts/deviceauth/token"))
+            .header("Content-Type", "application/json")
+            .header("User-Agent", user_agent())
+            .json(&body)
             .send()
             .await
-            .context("Failed polling OpenAI device-code token endpoint")?;
+            .context("Failed polling OpenAI device auth token")?;
 
         if response.status().is_success() {
-            return parse_token_response(response).await;
+            let data: DeviceAuthTokenResponse = response
+                .json()
+                .await
+                .context("Failed to parse device auth token response")?;
+
+            // Exchange the authorization_code + server-provided code_verifier for tokens.
+            let form = [
+                ("grant_type", "authorization_code"),
+                ("code", data.authorization_code.as_str()),
+                (
+                    "redirect_uri",
+                    &format!("{OPENAI_ISSUER}/deviceauth/callback"),
+                ),
+                ("client_id", OPENAI_OAUTH_CLIENT_ID),
+                ("code_verifier", data.code_verifier.as_str()),
+            ];
+
+            let token_response = client
+                .post(OPENAI_OAUTH_TOKEN_URL)
+                .form(&form)
+                .send()
+                .await
+                .context("Failed to exchange device auth code for tokens")?;
+
+            return parse_token_response(token_response).await;
         }
 
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-
-        if let Ok(err) = serde_json::from_str::<OAuthErrorResponse>(&text) {
-            match err.error.as_str() {
-                "authorization_pending" => {
-                    continue;
-                }
-                "slow_down" => {
-                    interval_secs = interval_secs.saturating_add(5);
-                    continue;
-                }
-                "access_denied" => {
-                    anyhow::bail!("OpenAI device-code authorization was denied")
-                }
-                "expired_token" => {
-                    anyhow::bail!("OpenAI device-code expired")
-                }
-                _ => {
-                    anyhow::bail!(
-                        "OpenAI device-code polling failed ({status}): {}",
-                        err.error_description.unwrap_or(err.error)
-                    )
-                }
-            }
+        // 403/404 = authorization pending, keep polling.
+        let status = response.status().as_u16();
+        if status == 403 || status == 404 {
+            continue;
         }
 
-        anyhow::bail!("OpenAI device-code polling failed ({status}): {text}");
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("OpenAI device auth polling failed ({status}): {body}");
     }
 }
 
-pub async fn receive_loopback_code(expected_state: &str, timeout: Duration) -> Result<String> {
-    let listener = TcpListener::bind("127.0.0.1:1455")
-        .await
-        .context("Failed to bind callback listener at 127.0.0.1:1455")?;
-
-    let accepted = tokio::time::timeout(timeout, listener.accept())
-        .await
-        .context("Timed out waiting for browser callback")?
-        .context("Failed to accept callback connection")?;
-
-    let (mut stream, _) = accepted;
-    let mut buffer = vec![0_u8; 8192];
-    let bytes_read = stream
-        .read(&mut buffer)
-        .await
-        .context("Failed to read callback request")?;
-
-    let request = String::from_utf8_lossy(&buffer[..bytes_read]);
-    let first_line = request
-        .lines()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("Malformed callback request"))?;
-
-    let path = first_line
-        .split_whitespace()
-        .nth(1)
-        .ok_or_else(|| anyhow::anyhow!("Callback request missing path"))?;
-
-    let code = parse_code_from_redirect(path, Some(expected_state))?;
-
-    let body =
-        "<html><body><h2>CrewForge login complete</h2><p>You can close this tab.</p></body></html>";
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    let _ = stream.write_all(response.as_bytes()).await;
-
-    Ok(code)
-}
-
-pub fn parse_code_from_redirect(input: &str, expected_state: Option<&str>) -> Result<String> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        anyhow::bail!("No OAuth code provided");
-    }
-
-    let query = if let Some((_, right)) = trimmed.split_once('?') {
-        right
-    } else {
-        trimmed
-    };
-
-    let params = parse_query_params(query);
-    let is_callback_payload = trimmed.contains('?')
-        || params.contains_key("code")
-        || params.contains_key("state")
-        || params.contains_key("error");
-
-    if let Some(err) = params.get("error") {
-        let desc = params
-            .get("error_description")
-            .cloned()
-            .unwrap_or_else(|| "OAuth authorization failed".to_string());
-        anyhow::bail!("OpenAI OAuth error: {err} ({desc})");
-    }
-
-    if let Some(expected_state) = expected_state {
-        if let Some(got) = params.get("state") {
-            if got != expected_state {
-                anyhow::bail!("OAuth state mismatch");
-            }
-        } else if is_callback_payload {
-            anyhow::bail!("Missing OAuth state in callback");
-        }
-    }
-
-    if let Some(code) = params.get("code").cloned() {
-        return Ok(code);
-    }
-
-    if !is_callback_payload {
-        return Ok(trimmed.to_string());
-    }
-
-    anyhow::bail!("Missing OAuth code in callback")
-}
-
+/// Extract account ID from a JWT token's claims.
+///
+/// Checks multiple claim paths used by OpenAI across different token types.
 pub fn extract_account_id_from_jwt(token: &str) -> Option<String> {
+    let claims = parse_jwt_claims(token)?;
+    extract_account_id_from_claims(&claims)
+}
+
+/// Extract account ID from an id_token first, falling back to access_token.
+///
+/// OpenAI's id_token typically contains richer claims including organization info.
+pub fn extract_account_id_from_tokens(
+    id_token: Option<&str>,
+    access_token: &str,
+) -> Option<String> {
+    if let Some(id) = id_token.and_then(|t| {
+        let claims = parse_jwt_claims(t)?;
+        extract_account_id_from_claims(&claims)
+    }) {
+        return Some(id);
+    }
+    extract_account_id_from_jwt(access_token)
+}
+
+fn parse_jwt_claims(token: &str) -> Option<serde_json::Value> {
     let payload = token.split('.').nth(1)?;
     let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload)
         .ok()?;
-    let claims: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    serde_json::from_slice(&decoded).ok()
+}
 
-    for key in [
-        "account_id",
-        "accountId",
-        "acct",
-        "sub",
-        "https://api.openai.com/account_id",
-    ] {
+fn extract_account_id_from_claims(claims: &serde_json::Value) -> Option<String> {
+    // Direct account ID fields
+    for key in ["chatgpt_account_id", "account_id", "accountId"] {
         if let Some(value) = claims.get(key).and_then(|v| v.as_str())
             && !value.trim().is_empty()
         {
             return Some(value.to_string());
         }
+    }
+
+    // Nested under https://api.openai.com/auth
+    if let Some(auth) = claims.get("https://api.openai.com/auth")
+        && let Some(value) = auth.get("chatgpt_account_id").and_then(|v| v.as_str())
+        && !value.trim().is_empty()
+    {
+        return Some(value.to_string());
+    }
+
+    // First organization ID as fallback
+    if let Some(orgs) = claims.get("organizations").and_then(|v| v.as_array())
+        && let Some(first) = orgs.first()
+        && let Some(id) = first.get("id").and_then(|v| v.as_str())
+        && !id.trim().is_empty()
+    {
+        return Some(id.to_string());
     }
 
     None
@@ -373,49 +292,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pkce_generation_is_valid() {
-        let pkce = generate_pkce_state();
-        assert!(pkce.code_verifier.len() >= 43);
-        assert!(!pkce.code_challenge.is_empty());
-        assert!(!pkce.state.is_empty());
-    }
-
-    #[test]
-    fn parse_redirect_url_extracts_code() {
-        let code = parse_code_from_redirect(
-            "http://127.0.0.1:1455/auth/callback?code=abc123&state=xyz",
-            Some("xyz"),
-        )
-        .unwrap();
-        assert_eq!(code, "abc123");
-    }
-
-    #[test]
-    fn parse_redirect_accepts_raw_code() {
-        let code = parse_code_from_redirect("raw-code", None).unwrap();
-        assert_eq!(code, "raw-code");
-    }
-
-    #[test]
-    fn parse_redirect_rejects_state_mismatch() {
-        let err = parse_code_from_redirect("/auth/callback?code=x&state=a", Some("b")).unwrap_err();
-        assert!(err.to_string().contains("state mismatch"));
-    }
-
-    #[test]
-    fn parse_redirect_rejects_error_without_code() {
-        let err = parse_code_from_redirect(
-            "/auth/callback?error=access_denied&error_description=user+cancelled",
-            Some("xyz"),
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("OpenAI OAuth error: access_denied")
-        );
-    }
-
-    #[test]
     fn extract_account_id_from_jwt_payload() {
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("{}");
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -424,5 +300,67 @@ mod tests {
 
         let account = extract_account_id_from_jwt(&token);
         assert_eq!(account.as_deref(), Some("acct_123"));
+    }
+
+    #[test]
+    fn extract_chatgpt_account_id() {
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("{}");
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode("{\"chatgpt_account_id\":\"chatgpt_456\"}");
+        let token = format!("{header}.{payload}.sig");
+
+        let account = extract_account_id_from_jwt(&token);
+        assert_eq!(account.as_deref(), Some("chatgpt_456"));
+    }
+
+    #[test]
+    fn extract_nested_auth_claim() {
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("{}");
+        let claims = serde_json::json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "nested_789"
+            }
+        });
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(claims.to_string());
+        let token = format!("{header}.{payload}.sig");
+
+        let account = extract_account_id_from_jwt(&token);
+        assert_eq!(account.as_deref(), Some("nested_789"));
+    }
+
+    #[test]
+    fn extract_organization_id_fallback() {
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("{}");
+        let claims = serde_json::json!({
+            "organizations": [{"id": "org_001"}]
+        });
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(claims.to_string());
+        let token = format!("{header}.{payload}.sig");
+
+        let account = extract_account_id_from_jwt(&token);
+        assert_eq!(account.as_deref(), Some("org_001"));
+    }
+
+    #[test]
+    fn extract_from_tokens_prefers_id_token() {
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("{}");
+        let id_payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode("{\"chatgpt_account_id\":\"from_id_token\"}");
+        let access_payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode("{\"chatgpt_account_id\":\"from_access_token\"}");
+        let id_token = format!("{header}.{id_payload}.sig");
+        let access_token = format!("{header}.{access_payload}.sig");
+
+        let account = extract_account_id_from_tokens(Some(&id_token), &access_token);
+        assert_eq!(account.as_deref(), Some("from_id_token"));
+    }
+
+    #[test]
+    fn user_agent_is_non_empty() {
+        let ua = user_agent();
+        assert!(ua.starts_with("crewforge/"));
+        assert!(ua.contains(std::env::consts::OS));
     }
 }

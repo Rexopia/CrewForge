@@ -30,7 +30,7 @@ pub enum AuthCommands {
 
     /// Complete OAuth by pasting the redirect URL or auth code (fallback for browser flow)
     PasteRedirect {
-        /// Provider: openai-codex or gemini
+        /// Provider: gemini
         #[arg(long)]
         provider: String,
 
@@ -262,11 +262,14 @@ fn read_plain_input(prompt: &str) -> Result<String> {
 
 // ── Small utilities ────────────────────────────────────────────────────────────
 
-fn extract_openai_account_id(access_token: &str) -> Option<String> {
-    let id = auth::openai_oauth::extract_account_id_from_jwt(access_token);
+fn extract_openai_account_id(token_set: &auth::profiles::TokenSet) -> Option<String> {
+    let id = auth::openai_oauth::extract_account_id_from_tokens(
+        token_set.id_token.as_deref(),
+        &token_set.access_token,
+    );
     if id.is_none() {
         tracing::warn!(
-            "Could not extract OpenAI account id from OAuth access token; \
+            "Could not extract OpenAI account id from OAuth tokens; \
              requests may fail until re-authentication."
         );
     }
@@ -340,7 +343,7 @@ async fn run_login(provider: String, profile: String, device_code: bool) -> Resu
 
     match provider.as_str() {
         "gemini" => run_gemini_login(&svc, &client, &profile, device_code).await,
-        "openai-codex" => run_openai_login(&svc, &client, &profile, device_code).await,
+        "openai-codex" => run_openai_login(&svc, &client, &profile).await,
         _ => bail!("`auth login` supports --provider openai-codex or gemini, got: {provider}"),
     }
 }
@@ -426,72 +429,17 @@ async fn run_openai_login(
     svc: &AuthService,
     client: &reqwest::Client,
     profile: &str,
-    device_code: bool,
 ) -> Result<()> {
-    if device_code {
-        match auth::openai_oauth::start_device_code_flow(client).await {
-            Ok(device) => {
-                println!("OpenAI device-code login started.");
-                println!("Visit: {}", device.verification_uri);
-                println!("Code:  {}", device.user_code);
-                if let Some(uri) = &device.verification_uri_complete {
-                    println!("Fast link: {uri}");
-                }
-                if let Some(msg) = &device.message {
-                    println!("{msg}");
-                }
-                let token_set =
-                    auth::openai_oauth::poll_device_code_tokens(client, &device).await?;
-                let account_id = extract_openai_account_id(&token_set.access_token);
-                svc.store_openai_tokens(profile, token_set, account_id, true)
-                    .await?;
-                clear_pending("openai");
-                println!("Saved profile {profile}");
-                println!("Active profile for openai-codex: {profile}");
-                return Ok(());
-            }
-            Err(e) => {
-                println!("Device-code flow unavailable: {e}. Falling back to browser/paste flow.");
-            }
-        }
-    }
-
-    let pkce = auth::openai_oauth::generate_pkce_state();
-    save_pending(&PendingOAuthLogin {
-        provider: "openai".to_string(),
-        profile: profile.to_string(),
-        code_verifier: pkce.code_verifier.clone(),
-        state: pkce.state.clone(),
-        created_at: Utc::now().to_rfc3339(),
-    })?;
-
-    let authorize_url = auth::openai_oauth::build_authorize_url(&pkce);
-    println!("Open this URL in your browser and authorize access:");
-    println!("{authorize_url}");
+    let device = auth::openai_oauth::start_device_code_flow(client).await?;
+    println!("OpenAI device authorization started.");
+    println!("Visit: {}", device.verification_uri);
+    println!("Code:  {}", device.user_code);
     println!();
-    println!("Waiting for callback at http://localhost:1455/auth/callback ...");
-
-    let code = match auth::openai_oauth::receive_loopback_code(
-        &pkce.state,
-        std::time::Duration::from_secs(180),
-    )
-    .await
-    {
-        Ok(code) => code,
-        Err(e) => {
-            println!("Callback capture failed: {e}");
-            println!(
-                "Run `crewforge auth paste-redirect --provider openai-codex --profile {profile}`"
-            );
-            return Ok(());
-        }
-    };
-
-    let token_set = auth::openai_oauth::exchange_code_for_tokens(client, &code, &pkce).await?;
-    let account_id = extract_openai_account_id(&token_set.access_token);
+    println!("Waiting for authorization...");
+    let token_set = auth::openai_oauth::poll_device_code_tokens(client, &device).await?;
+    let account_id = extract_openai_account_id(&token_set);
     svc.store_openai_tokens(profile, token_set, account_id, true)
         .await?;
-    clear_pending("openai");
     println!("Saved profile {profile}");
     println!("Active profile for openai-codex: {profile}");
     Ok(())
@@ -509,42 +457,6 @@ async fn run_paste_redirect(
     let client = reqwest::Client::new();
 
     match provider.as_str() {
-        "openai-codex" => {
-            let pending = load_pending("openai")?.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "No pending OpenAI login found. \
-                     Run `crewforge auth login --provider openai-codex` first."
-                )
-            })?;
-            if pending.profile != profile {
-                bail!(
-                    "Pending login profile mismatch: pending={}, requested={}",
-                    pending.profile,
-                    profile
-                );
-            }
-            let redirect_input = match input {
-                Some(v) => v,
-                None => read_plain_input("Paste redirect URL or OAuth code")?,
-            };
-            let code = auth::openai_oauth::parse_code_from_redirect(
-                &redirect_input,
-                Some(&pending.state),
-            )?;
-            let pkce = PkceState {
-                code_verifier: pending.code_verifier,
-                code_challenge: String::new(),
-                state: pending.state,
-            };
-            let token_set =
-                auth::openai_oauth::exchange_code_for_tokens(&client, &code, &pkce).await?;
-            let account_id = extract_openai_account_id(&token_set.access_token);
-            svc.store_openai_tokens(&profile, token_set, account_id, true)
-                .await?;
-            clear_pending("openai");
-            println!("Saved profile {profile}");
-            println!("Active profile for openai-codex: {profile}");
-        }
         "gemini" => {
             let pending = load_pending("gemini")?.ok_or_else(|| {
                 anyhow::anyhow!(
@@ -584,7 +496,7 @@ async fn run_paste_redirect(
             println!("Saved profile {profile}");
             println!("Active profile for gemini: {profile}");
         }
-        _ => bail!("`auth paste-redirect` supports --provider openai-codex or gemini"),
+        _ => bail!("`auth paste-redirect` supports --provider gemini"),
     }
     Ok(())
 }

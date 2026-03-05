@@ -1,5 +1,5 @@
 use crate::auth::AuthService;
-use crate::auth::openai_oauth::extract_account_id_from_jwt;
+use crate::auth::openai_oauth::extract_account_id_from_tokens;
 use crate::provider::ProviderRuntimeOptions;
 use crate::provider::traits::{ChatMessage, Provider, ProviderCapabilities};
 use async_trait::async_trait;
@@ -18,8 +18,6 @@ pub struct OpenAiCodexProvider {
     auth: AuthService,
     auth_profile_override: Option<String>,
     responses_url: String,
-    custom_endpoint: bool,
-    gateway_api_key: Option<String>,
     client: Client,
 }
 
@@ -86,10 +84,7 @@ struct ResponsesContent {
 }
 
 impl OpenAiCodexProvider {
-    pub fn new(
-        options: &ProviderRuntimeOptions,
-        gateway_api_key: Option<&str>,
-    ) -> anyhow::Result<Self> {
+    pub fn new(options: &ProviderRuntimeOptions) -> anyhow::Result<Self> {
         let state_dir = options
             .crewforge_dir
             .clone()
@@ -100,9 +95,7 @@ impl OpenAiCodexProvider {
         Ok(Self {
             auth,
             auth_profile_override: options.auth_profile_override.clone(),
-            custom_endpoint: !is_default_responses_url(&responses_url),
             responses_url,
-            gateway_api_key: gateway_api_key.map(ToString::to_string),
             client: Client::builder()
                 .timeout(std::time::Duration::from_secs(120))
                 .connect_timeout(std::time::Duration::from_secs(10))
@@ -173,18 +166,6 @@ fn resolve_responses_url(options: &ProviderRuntimeOptions) -> anyhow::Result<Str
     }
 
     Ok(DEFAULT_CODEX_RESPONSES_URL.to_string())
-}
-
-fn canonical_endpoint(url: &str) -> Option<(String, String, u16, String)> {
-    let parsed = reqwest::Url::parse(url).ok()?;
-    let host = parsed.host_str()?.to_ascii_lowercase();
-    let port = parsed.port_or_known_default()?;
-    let path = parsed.path().trim_end_matches('/').to_string();
-    Some((parsed.scheme().to_ascii_lowercase(), host, port, path))
-}
-
-fn is_default_responses_url(url: &str) -> bool {
-    canonical_endpoint(url) == canonical_endpoint(DEFAULT_CODEX_RESPONSES_URL)
 }
 
 fn first_nonempty(text: Option<&str>) -> Option<String> {
@@ -491,61 +472,36 @@ impl OpenAiCodexProvider {
         instructions: String,
         model: &str,
     ) -> anyhow::Result<String> {
-        let use_gateway_api_key_auth = self.custom_endpoint && self.gateway_api_key.is_some();
-        let profile = match self
+        let profile = self
             .auth
             .get_profile("openai-codex", self.auth_profile_override.as_deref())
-            .await
-        {
-            Ok(profile) => profile,
-            Err(err) if use_gateway_api_key_auth => {
-                tracing::warn!(
-                    error = %err,
-                    "failed to load OpenAI Codex profile; continuing with custom endpoint API key mode"
-                );
-                None
-            }
-            Err(err) => return Err(err),
-        };
-        let oauth_access_token = match self
+            .await?;
+
+        let access_token = self
             .auth
             .get_valid_openai_access_token(self.auth_profile_override.as_deref())
-            .await
-        {
-            Ok(token) => token,
-            Err(err) if use_gateway_api_key_auth => {
-                tracing::warn!(
-                    error = %err,
-                    "failed to refresh OpenAI token; continuing with custom endpoint API key mode"
-                );
-                None
-            }
-            Err(err) => return Err(err),
-        };
-
-        let account_id = profile.and_then(|profile| profile.account_id).or_else(|| {
-            oauth_access_token
-                .as_deref()
-                .and_then(extract_account_id_from_jwt)
-        });
-        let access_token = if use_gateway_api_key_auth {
-            oauth_access_token
-        } else {
-            Some(oauth_access_token.ok_or_else(|| {
+            .await?
+            .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "OpenAI Codex auth profile not found. Run `crewforge auth login --provider openai-codex`."
+                    "OpenAI Codex OAuth credentials not found. Run `crewforge auth login --provider openai-codex`."
                 )
-            })?)
-        };
-        let account_id = if use_gateway_api_key_auth {
-            account_id
-        } else {
-            Some(account_id.ok_or_else(|| {
+            })?;
+
+        let id_token_str = profile
+            .as_ref()
+            .and_then(|p| p.token_set.as_ref())
+            .and_then(|ts| ts.id_token.clone());
+        let account_id = profile
+            .and_then(|p| p.account_id)
+            .or_else(|| {
+                extract_account_id_from_tokens(id_token_str.as_deref(), &access_token)
+            })
+            .ok_or_else(|| {
                 anyhow::anyhow!(
                     "OpenAI Codex account id not found in auth profile/token. Run `crewforge auth login --provider openai-codex` again."
                 )
-            })?)
-        };
+            })?;
+
         let normalized_model = normalize_model_id(model);
 
         let request = ResponsesRequest {
@@ -566,33 +522,15 @@ impl OpenAiCodexProvider {
             parallel_tool_calls: true,
         };
 
-        let bearer_token = if use_gateway_api_key_auth {
-            self.gateway_api_key.as_deref().unwrap_or_default()
-        } else {
-            access_token.as_deref().unwrap_or_default()
-        };
-
-        let mut request_builder = self
+        let request_builder = self
             .client
             .post(&self.responses_url)
-            .header("Authorization", format!("Bearer {bearer_token}"))
+            .header("Authorization", format!("Bearer {access_token}"))
             .header("OpenAI-Beta", "responses=experimental")
             .header("originator", "pi")
             .header("accept", "text/event-stream")
-            .header("Content-Type", "application/json");
-
-        if let Some(account_id) = account_id.as_deref() {
-            request_builder = request_builder.header("chatgpt-account-id", account_id);
-        }
-
-        if use_gateway_api_key_auth {
-            if let Some(access_token) = access_token.as_deref() {
-                request_builder = request_builder.header("x-openai-access-token", access_token);
-            }
-            if let Some(account_id) = account_id.as_deref() {
-                request_builder = request_builder.header("x-openai-account-id", account_id);
-            }
-        }
+            .header("Content-Type", "application/json")
+            .header("chatgpt-account-id", &account_id);
 
         let response = request_builder.json(&request).send().await?;
 
@@ -752,26 +690,14 @@ mod tests {
     }
 
     #[test]
-    fn default_responses_url_detector_handles_equivalent_urls() {
-        assert!(is_default_responses_url(DEFAULT_CODEX_RESPONSES_URL));
-        assert!(is_default_responses_url(
-            "https://chatgpt.com/backend-api/codex/responses/"
-        ));
-        assert!(!is_default_responses_url(
-            "https://api.tonsof.blue/v1/responses"
-        ));
-    }
-
-    #[test]
-    fn constructor_enables_custom_endpoint_key_mode() {
+    fn constructor_with_custom_endpoint() {
         let options = ProviderRuntimeOptions {
             provider_api_url: Some("https://api.tonsof.blue/v1".to_string()),
             ..ProviderRuntimeOptions::default()
         };
 
-        let provider = OpenAiCodexProvider::new(&options, Some("test-key")).unwrap();
-        assert!(provider.custom_endpoint);
-        assert_eq!(provider.gateway_api_key.as_deref(), Some("test-key"));
+        let provider = OpenAiCodexProvider::new(&options).unwrap();
+        assert!(provider.responses_url.contains("tonsof.blue"));
     }
 
     #[test]
@@ -944,15 +870,8 @@ data: [DONE]
 
     #[test]
     fn capabilities_excludes_vision() {
-        let options = ProviderRuntimeOptions {
-            provider_api_url: None,
-            crewforge_dir: None,
-            secrets_encrypt: false,
-            auth_profile_override: None,
-            reasoning_enabled: None,
-        };
-        let provider =
-            OpenAiCodexProvider::new(&options, None).expect("provider should initialize");
+        let options = ProviderRuntimeOptions::default();
+        let provider = OpenAiCodexProvider::new(&options).expect("provider should initialize");
         let caps = provider.capabilities();
 
         assert!(!caps.native_tool_calling);
