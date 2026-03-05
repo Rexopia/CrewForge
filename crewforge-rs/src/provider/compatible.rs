@@ -7,6 +7,7 @@ use crate::provider::traits::{
     Provider, ProviderCapabilities, TokenUsage, ToolCall as ProviderToolCall, ToolSpec,
 };
 use async_trait::async_trait;
+use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +22,7 @@ pub struct OpenAiCompatibleProvider {
     name: String,
     base_url: String,
     credential: Option<String>,
+    stream: bool,
     client: Client,
 }
 
@@ -180,6 +182,168 @@ impl ResponseMessage {
     }
 }
 
+// ── SSE streaming types ──────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct StreamChunk {
+    #[serde(default)]
+    choices: Vec<StreamChoice>,
+    #[serde(default)]
+    usage: Option<UsageInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamChoice {
+    #[serde(default)]
+    delta: Option<StreamDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamDelta {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<StreamToolCallDelta>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamToolCallDelta {
+    #[serde(default)]
+    index: Option<usize>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<StreamFunctionDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamFunctionDelta {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
+/// Accumulates streamed SSE deltas into a final response.
+#[derive(Default)]
+struct StreamAccumulator {
+    content: String,
+    reasoning_content: String,
+    tool_calls: Vec<ToolCallAccum>,
+    usage: Option<UsageInfo>,
+}
+
+struct ToolCallAccum {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+impl StreamAccumulator {
+    fn apply_chunk(&mut self, chunk: StreamChunk) {
+        if let Some(u) = chunk.usage {
+            self.usage = Some(u);
+        }
+        let Some(choice) = chunk.choices.into_iter().next() else {
+            return;
+        };
+        let Some(delta) = choice.delta else {
+            return;
+        };
+
+        if let Some(text) = delta.content {
+            self.content.push_str(&text);
+        }
+        if let Some(text) = delta.reasoning_content {
+            self.reasoning_content.push_str(&text);
+        }
+        if let Some(tool_calls) = delta.tool_calls {
+            for tc_delta in tool_calls {
+                let idx = tc_delta.index.unwrap_or(self.tool_calls.len());
+                // Grow the vec if needed
+                while self.tool_calls.len() <= idx {
+                    self.tool_calls.push(ToolCallAccum {
+                        id: String::new(),
+                        name: String::new(),
+                        arguments: String::new(),
+                    });
+                }
+                let accum = &mut self.tool_calls[idx];
+                if let Some(id) = tc_delta.id {
+                    accum.id = id;
+                }
+                if let Some(func) = tc_delta.function {
+                    if let Some(name) = func.name {
+                        accum.name.push_str(&name);
+                    }
+                    if let Some(args) = func.arguments {
+                        accum.arguments.push_str(&args);
+                    }
+                }
+            }
+        }
+    }
+
+    fn into_response(self) -> (ProviderChatResponse, Option<TokenUsage>) {
+        let usage = self.usage.map(|u| TokenUsage {
+            input_tokens: u.prompt_tokens,
+            output_tokens: u.completion_tokens,
+        });
+
+        let has_content = !self.content.trim().is_empty();
+        let has_reasoning = !self.reasoning_content.trim().is_empty();
+
+        let reasoning_content = if has_reasoning {
+            Some(self.reasoning_content.clone())
+        } else {
+            None
+        };
+
+        let text = if has_content {
+            Some(self.content)
+        } else if has_reasoning {
+            Some(self.reasoning_content)
+        } else {
+            None
+        };
+
+        let tool_calls = self
+            .tool_calls
+            .into_iter()
+            .filter(|tc| !tc.name.is_empty())
+            .map(|tc| {
+                let arguments =
+                    if serde_json::from_str::<serde_json::Value>(&tc.arguments).is_ok() {
+                        tc.arguments
+                    } else {
+                        "{}".to_string()
+                    };
+                ProviderToolCall {
+                    id: if tc.id.is_empty() {
+                        uuid::Uuid::new_v4().to_string()
+                    } else {
+                        tc.id
+                    },
+                    name: tc.name,
+                    arguments,
+                }
+            })
+            .collect();
+
+        (
+            ProviderChatResponse {
+                text,
+                tool_calls,
+                usage: None,
+                reasoning_content,
+            },
+            usage,
+        )
+    }
+}
+
 // ── Image marker parsing ─────────────────────────────────────────────────────
 
 /// Check if text contains `[IMAGE:...]` markers.
@@ -255,6 +419,15 @@ fn build_content(text: Option<&str>) -> RequestContent {
 
 impl OpenAiCompatibleProvider {
     pub fn new(name: &str, base_url: &str, credential: Option<&str>) -> Self {
+        Self::with_stream(name, base_url, credential, false)
+    }
+
+    pub fn with_stream(
+        name: &str,
+        base_url: &str,
+        credential: Option<&str>,
+        stream: bool,
+    ) -> Self {
         Self {
             name: name.to_string(),
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -262,6 +435,7 @@ impl OpenAiCompatibleProvider {
                 .map(str::trim)
                 .filter(|k| !k.is_empty())
                 .map(ToString::to_string),
+            stream,
             client: Client::builder()
                 .timeout(std::time::Duration::from_secs(120))
                 .connect_timeout(std::time::Duration::from_secs(10))
@@ -439,6 +613,116 @@ impl OpenAiCompatibleProvider {
             usage,
         )
     }
+
+    /// Send a request and decode the SSE stream into a final response.
+    async fn send_streaming(
+        &self,
+        request: ChatCompletionsRequest,
+    ) -> anyhow::Result<(ProviderChatResponse, Option<TokenUsage>)> {
+        let credential = self.require_credential()?;
+        let url = self.chat_completions_url();
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {credential}"))
+            .header("Accept", "text/event-stream")
+            .json(&request)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(api_error(&self.name, response).await);
+        }
+
+        let mut accum = StreamAccumulator::default();
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk?;
+            buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+            // Process complete SSE events (separated by \n\n)
+            while let Some(boundary) = buffer.find("\n\n") {
+                let event_block = buffer[..boundary].to_string();
+                buffer = buffer[boundary + 2..].to_string();
+
+                for line in event_block.lines() {
+                    let data = match line.strip_prefix("data:") {
+                        Some(d) => d.trim(),
+                        None => continue,
+                    };
+                    if data == "[DONE]" || data.is_empty() {
+                        continue;
+                    }
+                    if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) {
+                        accum.apply_chunk(chunk);
+                    }
+                }
+            }
+        }
+
+        // Process any remaining data in the buffer
+        for line in buffer.lines() {
+            let data = match line.strip_prefix("data:") {
+                Some(d) => d.trim(),
+                None => continue,
+            };
+            if data == "[DONE]" || data.is_empty() {
+                continue;
+            }
+            if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) {
+                accum.apply_chunk(chunk);
+            }
+        }
+
+        Ok(accum.into_response())
+    }
+
+    /// Send a request and decode as a single JSON response.
+    async fn send_non_streaming(
+        &self,
+        request: ChatCompletionsRequest,
+    ) -> anyhow::Result<(ProviderChatResponse, Option<TokenUsage>)> {
+        let credential = self.require_credential()?;
+        let url = self.chat_completions_url();
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {credential}"))
+            .json(&request)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(api_error(&self.name, response).await);
+        }
+
+        let body = response.text().await?;
+        let parsed: ChatCompletionsResponse = serde_json::from_str(&body).map_err(|e| {
+            anyhow::anyhow!(
+                "{} unexpected response: {e}; body={}",
+                self.name,
+                sanitize_api_error(&body)
+            )
+        })?;
+
+        Ok(Self::parse_response(parsed))
+    }
+
+    /// Send a request, dispatching to streaming or non-streaming based on config.
+    async fn send_request(
+        &self,
+        request: ChatCompletionsRequest,
+    ) -> anyhow::Result<(ProviderChatResponse, Option<TokenUsage>)> {
+        if self.stream {
+            self.send_streaming(request).await
+        } else {
+            self.send_non_streaming(request).await
+        }
+    }
 }
 
 // ── Public utilities (used by other provider modules) ────────────────────────
@@ -504,8 +788,6 @@ impl Provider for OpenAiCompatibleProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<String> {
-        let credential = self.require_credential()?;
-
         let mut messages = Vec::new();
         if let Some(sys) = system_prompt {
             messages.push(RequestMessage {
@@ -528,35 +810,13 @@ impl Provider for OpenAiCompatibleProvider {
             model: model.to_string(),
             messages,
             temperature,
-            stream: Some(false),
+            stream: Some(self.stream),
             tools: None,
             tool_choice: None,
             max_tokens: None,
         };
 
-        let url = self.chat_completions_url();
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {credential}"))
-            .json(&request)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            return Err(api_error(&self.name, response).await);
-        }
-
-        let body = response.text().await?;
-        let parsed: ChatCompletionsResponse = serde_json::from_str(&body).map_err(|e| {
-            anyhow::anyhow!(
-                "{} unexpected response: {e}; body={}",
-                self.name,
-                sanitize_api_error(&body)
-            )
-        })?;
-
-        let (result, _) = Self::parse_response(parsed);
+        let (result, _) = self.send_request(request).await?;
         result
             .text
             .ok_or_else(|| anyhow::anyhow!("No response from {}", self.name))
@@ -568,41 +828,17 @@ impl Provider for OpenAiCompatibleProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<String> {
-        let credential = self.require_credential()?;
-
         let request = ChatCompletionsRequest {
             model: model.to_string(),
             messages: Self::convert_messages(messages),
             temperature,
-            stream: Some(false),
+            stream: Some(self.stream),
             tools: None,
             tool_choice: None,
             max_tokens: None,
         };
 
-        let url = self.chat_completions_url();
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {credential}"))
-            .json(&request)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            return Err(api_error(&self.name, response).await);
-        }
-
-        let body = response.text().await?;
-        let parsed: ChatCompletionsResponse = serde_json::from_str(&body).map_err(|e| {
-            anyhow::anyhow!(
-                "{} unexpected response: {e}; body={}",
-                self.name,
-                sanitize_api_error(&body)
-            )
-        })?;
-
-        let (result, _) = Self::parse_response(parsed);
+        let (result, _) = self.send_request(request).await?;
         result
             .text
             .ok_or_else(|| anyhow::anyhow!("No response from {}", self.name))
@@ -614,42 +850,18 @@ impl Provider for OpenAiCompatibleProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<ProviderChatResponse> {
-        let credential = self.require_credential()?;
-
         let tools = Self::convert_tools(request.tools);
         let api_request = ChatCompletionsRequest {
             model: model.to_string(),
             messages: Self::convert_messages(request.messages),
             temperature,
-            stream: Some(false),
+            stream: Some(self.stream),
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
             max_tokens: None,
         };
 
-        let url = self.chat_completions_url();
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {credential}"))
-            .json(&api_request)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            return Err(api_error(&self.name, response).await);
-        }
-
-        let body = response.text().await?;
-        let parsed: ChatCompletionsResponse = serde_json::from_str(&body).map_err(|e| {
-            anyhow::anyhow!(
-                "{} unexpected response: {e}; body={}",
-                self.name,
-                sanitize_api_error(&body)
-            )
-        })?;
-
-        let (mut result, usage) = Self::parse_response(parsed);
+        let (mut result, usage) = self.send_request(api_request).await?;
         result.usage = usage;
         Ok(result)
     }
@@ -1050,5 +1262,124 @@ mod tests {
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"max_tokens\":4096"));
+    }
+
+    // ── Streaming tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn stream_accumulator_text_deltas() {
+        let mut accum = StreamAccumulator::default();
+        accum.apply_chunk(serde_json::from_str(
+            r#"{"choices":[{"delta":{"content":"Hello"}}]}"#,
+        ).unwrap());
+        accum.apply_chunk(serde_json::from_str(
+            r#"{"choices":[{"delta":{"content":" world"}}]}"#,
+        ).unwrap());
+        let (resp, _) = accum.into_response();
+        assert_eq!(resp.text.as_deref(), Some("Hello world"));
+        assert!(resp.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn stream_accumulator_tool_call_deltas() {
+        let mut accum = StreamAccumulator::default();
+        // First chunk: tool call id + name
+        accum.apply_chunk(serde_json::from_str(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"shell","arguments":""}}]}}]}"#,
+        ).unwrap());
+        // Second chunk: arguments fragment
+        accum.apply_chunk(serde_json::from_str(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"cmd\""}}]}}]}"#,
+        ).unwrap());
+        // Third chunk: arguments rest
+        accum.apply_chunk(serde_json::from_str(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"ls\"}"}}]}}]}"#,
+        ).unwrap());
+
+        let (resp, _) = accum.into_response();
+        assert_eq!(resp.tool_calls.len(), 1);
+        assert_eq!(resp.tool_calls[0].name, "shell");
+        assert_eq!(resp.tool_calls[0].id, "call_1");
+        assert_eq!(resp.tool_calls[0].arguments, r#"{"cmd":"ls"}"#);
+    }
+
+    #[test]
+    fn stream_accumulator_multiple_tool_calls() {
+        let mut accum = StreamAccumulator::default();
+        accum.apply_chunk(serde_json::from_str(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read","arguments":"{}"}}]}}]}"#,
+        ).unwrap());
+        accum.apply_chunk(serde_json::from_str(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":1,"id":"c2","function":{"name":"write","arguments":"{}"}}]}}]}"#,
+        ).unwrap());
+
+        let (resp, _) = accum.into_response();
+        assert_eq!(resp.tool_calls.len(), 2);
+        assert_eq!(resp.tool_calls[0].name, "read");
+        assert_eq!(resp.tool_calls[1].name, "write");
+    }
+
+    #[test]
+    fn stream_accumulator_usage_from_last_chunk() {
+        let mut accum = StreamAccumulator::default();
+        accum.apply_chunk(serde_json::from_str(
+            r#"{"choices":[{"delta":{"content":"hi"}}]}"#,
+        ).unwrap());
+        accum.apply_chunk(serde_json::from_str(
+            r#"{"choices":[{"delta":{}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+        ).unwrap());
+
+        let (resp, usage) = accum.into_response();
+        assert_eq!(resp.text.as_deref(), Some("hi"));
+        let usage = usage.unwrap();
+        assert_eq!(usage.input_tokens, Some(10));
+        assert_eq!(usage.output_tokens, Some(5));
+    }
+
+    #[test]
+    fn stream_accumulator_reasoning_content() {
+        let mut accum = StreamAccumulator::default();
+        accum.apply_chunk(serde_json::from_str(
+            r#"{"choices":[{"delta":{"reasoning_content":"thinking"}}]}"#,
+        ).unwrap());
+        accum.apply_chunk(serde_json::from_str(
+            r#"{"choices":[{"delta":{"content":"answer"}}]}"#,
+        ).unwrap());
+
+        let (resp, _) = accum.into_response();
+        assert_eq!(resp.text.as_deref(), Some("answer"));
+        assert_eq!(resp.reasoning_content.as_deref(), Some("thinking"));
+    }
+
+    #[test]
+    fn stream_accumulator_empty_produces_none() {
+        let accum = StreamAccumulator::default();
+        let (resp, usage) = accum.into_response();
+        assert!(resp.text.is_none());
+        assert!(resp.tool_calls.is_empty());
+        assert!(usage.is_none());
+    }
+
+    #[test]
+    fn stream_chunk_deserializes() {
+        let json = r#"{"choices":[{"delta":{"content":"Hello"}}]}"#;
+        let chunk: StreamChunk = serde_json::from_str(json).unwrap();
+        assert_eq!(chunk.choices.len(), 1);
+        assert_eq!(
+            chunk.choices[0].delta.as_ref().unwrap().content.as_deref(),
+            Some("Hello")
+        );
+    }
+
+    #[test]
+    fn with_stream_constructor() {
+        let p = OpenAiCompatibleProvider::with_stream(
+            "test", "https://api.example.com/v1", Some("sk-test"), true,
+        );
+        assert!(p.stream);
+        assert_eq!(p.credential.as_deref(), Some("sk-test"));
+
+        let p2 = OpenAiCompatibleProvider::new("test", "https://api.example.com/v1", None);
+        assert!(!p2.stream);
     }
 }
