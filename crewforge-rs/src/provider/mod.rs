@@ -1,4 +1,3 @@
-pub mod anthropic_oauth;
 pub mod compatible;
 pub mod openai_oauth;
 pub mod reliable;
@@ -16,7 +15,7 @@ pub use router::{Route, RouterProvider};
 
 use compatible::OpenAiCompatibleProvider;
 
-/// Runtime options for providers that use OAuth/auth services (anthropic, openai-codex).
+/// Runtime options for providers that use OAuth/auth services (openai-codex).
 #[derive(Debug, Default)]
 pub struct ProviderRuntimeOptions {
     pub crewforge_dir: Option<std::path::PathBuf>,
@@ -35,16 +34,16 @@ pub fn create_provider(
 ) -> anyhow::Result<Box<dyn Provider>> {
     let resolved_key = resolve_api_key(provider_name, api_key);
     let p: Box<dyn Provider> = match provider_name.to_lowercase().as_str() {
-        "anthropic" | "claude" => {
-            let opts = ProviderRuntimeOptions {
-                provider_api_url: base_url.map(ToString::to_string),
-                ..ProviderRuntimeOptions::default()
-            };
-            Box::new(
-                anthropic_oauth::AnthropicOAuthProvider::new(&opts)
-                    .map_err(|e| anyhow::anyhow!("Failed to create Anthropic provider: {e}"))?,
-            )
-        }
+        "anthropic" | "claude" => Box::new(OpenAiCompatibleProvider::new(
+            "anthropic",
+            base_url.unwrap_or("https://api.anthropic.com/v1"),
+            resolved_key.as_deref(),
+        )),
+        "gemini" | "google" => Box::new(OpenAiCompatibleProvider::new(
+            "gemini",
+            base_url.unwrap_or("https://generativelanguage.googleapis.com/v1beta/openai"),
+            resolved_key.as_deref(),
+        )),
         "openai" | "gpt" => Box::new(OpenAiCompatibleProvider::new(
             "openai",
             base_url.unwrap_or("https://api.openai.com/v1"),
@@ -131,6 +130,8 @@ fn resolve_api_key(provider_name: &str, explicit: Option<&str>) -> Option<String
 /// Default environment variable name for a provider's API key.
 pub fn default_api_key_env(provider_name: &str) -> Option<&'static str> {
     match provider_name.to_lowercase().as_str() {
+        "anthropic" | "claude" => Some("ANTHROPIC_API_KEY"),
+        "gemini" | "google" => Some("GEMINI_API_KEY"),
         "openai" | "gpt" => Some("OPENAI_API_KEY"),
         "openrouter" => Some("OPENROUTER_API_KEY"),
         "moonshot" | "kimi" => Some("MOONSHOT_API_KEY"),
