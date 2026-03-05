@@ -18,7 +18,7 @@ use clap::Args;
 use crewforge::{
     agent::{AgentEvent, AgentSession, AgentSessionConfig, StopReason, Tool},
     auth::{AuthService, default_state_dir},
-    provider::{self, default_api_key_env},
+    provider::{self, ProviderRegistry},
     security::SecurityPolicy,
     tools::{TokioRuntime, default_tools},
 };
@@ -149,7 +149,8 @@ pub async fn run(args: AgentArgs) -> Result<()> {
     // Resolve API key: flag > env var > auth profile
     let resolved_key: Option<String> = if let Some(k) = &args.api_key {
         Some(k.clone())
-    } else if default_api_key_env(&args.provider)
+    } else if ProviderRegistry::load()
+        .api_key_env(&args.provider)
         .and_then(|env| std::env::var(env).ok())
         .filter(|v| !v.is_empty())
         .is_some()

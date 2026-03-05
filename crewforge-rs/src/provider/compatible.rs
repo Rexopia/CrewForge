@@ -36,11 +36,18 @@ struct ChatCompletionsRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+struct StreamOptions {
+    include_usage: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -444,6 +451,16 @@ impl OpenAiCompatibleProvider {
         }
     }
 
+    /// Returns `(stream, stream_options)` for the request.
+    /// Only sends the fields when streaming is enabled.
+    fn stream_fields(&self) -> (Option<bool>, Option<StreamOptions>) {
+        if self.stream {
+            (Some(true), Some(StreamOptions { include_usage: true }))
+        } else {
+            (None, None)
+        }
+    }
+
     fn chat_completions_url(&self) -> String {
         if self.base_url.ends_with("/chat/completions") {
             self.base_url.clone()
@@ -656,8 +673,9 @@ impl OpenAiCompatibleProvider {
                     if data == "[DONE]" || data.is_empty() {
                         continue;
                     }
-                    if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) {
-                        accum.apply_chunk(chunk);
+                    match serde_json::from_str::<StreamChunk>(data) {
+                        Ok(chunk) => accum.apply_chunk(chunk),
+                        Err(e) => tracing::debug!(error = %e, data, "Skipping malformed SSE chunk"),
                     }
                 }
             }
@@ -672,8 +690,9 @@ impl OpenAiCompatibleProvider {
             if data == "[DONE]" || data.is_empty() {
                 continue;
             }
-            if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) {
-                accum.apply_chunk(chunk);
+            match serde_json::from_str::<StreamChunk>(data) {
+                Ok(chunk) => accum.apply_chunk(chunk),
+                Err(e) => tracing::debug!(error = %e, data, "Skipping malformed SSE chunk"),
             }
         }
 
@@ -729,21 +748,54 @@ impl OpenAiCompatibleProvider {
 
 /// Sanitize API error text by scrubbing secrets and truncating length.
 pub fn sanitize_api_error(input: &str) -> String {
-    let mut result = input.to_string();
-    if let Ok(re) = regex::Regex::new(r"sk-[A-Za-z0-9\-_]{8,}") {
-        result = re.replace_all(&result, "[REDACTED]").to_string();
+    const SECRET_PREFIXES: [&str; 7] = [
+        "sk-",
+        "xoxb-",
+        "xoxp-",
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "github_pat_",
+    ];
+    const MAX_CHARS: usize = 200;
+
+    let mut scrubbed = input.to_string();
+
+    for prefix in SECRET_PREFIXES {
+        let mut search_from = 0;
+        loop {
+            let Some(rel) = scrubbed[search_from..].find(prefix) else {
+                break;
+            };
+            let start = search_from + rel;
+            let content_start = start + prefix.len();
+
+            let end = scrubbed[content_start..]
+                .char_indices()
+                .take_while(|(_, c)| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                .last()
+                .map(|(i, c)| content_start + i + c.len_utf8())
+                .unwrap_or(content_start);
+
+            if end == content_start {
+                search_from = content_start;
+                continue;
+            }
+
+            scrubbed.replace_range(start..end, "[REDACTED]");
+            search_from = start + "[REDACTED]".len();
+        }
     }
 
-    const MAX_CHARS: usize = 200;
-    if result.chars().count() <= MAX_CHARS {
-        return result;
+    if scrubbed.chars().count() <= MAX_CHARS {
+        return scrubbed;
     }
 
     let mut end = MAX_CHARS;
-    while end > 0 && !result.is_char_boundary(end) {
+    while end > 0 && !scrubbed.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}...", &result[..end])
+    format!("{}...", &scrubbed[..end])
 }
 
 /// Build a sanitized provider error from a failed HTTP response.
@@ -806,11 +858,13 @@ impl Provider for OpenAiCompatibleProvider {
             reasoning_content: None,
         });
 
+        let (stream, stream_options) = self.stream_fields();
         let request = ChatCompletionsRequest {
             model: model.to_string(),
             messages,
             temperature,
-            stream: Some(self.stream),
+            stream,
+            stream_options,
             tools: None,
             tool_choice: None,
             max_tokens: None,
@@ -828,11 +882,13 @@ impl Provider for OpenAiCompatibleProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<String> {
+        let (stream, stream_options) = self.stream_fields();
         let request = ChatCompletionsRequest {
             model: model.to_string(),
             messages: Self::convert_messages(messages),
             temperature,
-            stream: Some(self.stream),
+            stream,
+            stream_options,
             tools: None,
             tool_choice: None,
             max_tokens: None,
@@ -851,11 +907,13 @@ impl Provider for OpenAiCompatibleProvider {
         temperature: f64,
     ) -> anyhow::Result<ProviderChatResponse> {
         let tools = Self::convert_tools(request.tools);
+        let (stream, stream_options) = self.stream_fields();
         let api_request = ChatCompletionsRequest {
             model: model.to_string(),
             messages: Self::convert_messages(request.messages),
             temperature,
-            stream: Some(self.stream),
+            stream,
+            stream_options,
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
             max_tokens: None,
@@ -940,7 +998,8 @@ mod tests {
                 reasoning_content: None,
             }],
             temperature: 0.7,
-            stream: Some(false),
+            stream: None,
+            stream_options: None,
             tools: None,
             tool_choice: None,
             max_tokens: None,
@@ -951,6 +1010,8 @@ mod tests {
         assert!(!json.contains("tool_call_id"));
         assert!(!json.contains("reasoning_content"));
         assert!(!json.contains("max_tokens"));
+        assert!(!json.contains("stream"));
+        assert!(!json.contains("stream_options"));
     }
 
     #[test]
@@ -1240,7 +1301,8 @@ mod tests {
             model: "gpt-4o".to_string(),
             messages: vec![],
             temperature: 0.7,
-            stream: Some(false),
+            stream: None,
+            stream_options: None,
             tools: None,
             tool_choice: None,
             max_tokens: None,
@@ -1255,7 +1317,8 @@ mod tests {
             model: "gpt-4o".to_string(),
             messages: vec![],
             temperature: 0.7,
-            stream: Some(false),
+            stream: None,
+            stream_options: None,
             tools: None,
             tool_choice: None,
             max_tokens: Some(4096),

@@ -90,21 +90,3 @@ fn resolve_api_key(
     std::env::var(env_var).ok().filter(|k| !k.is_empty())
 }
 
-/// Default environment variable name for a provider's API key.
-pub fn default_api_key_env(provider_name: &str) -> Option<&'static str> {
-    // Keep a static lookup for callers outside the provider module (auth_cmd, agent_cmd)
-    // that don't hold a registry instance.
-    match provider_name.to_lowercase().as_str() {
-        "openai" | "gpt" => Some("OPENAI_API_KEY"),
-        "gemini" | "google" => Some("GEMINI_API_KEY"),
-        "openrouter" => Some("OPENROUTER_API_KEY"),
-        "deepseek" => Some("DEEPSEEK_API_KEY"),
-        "groq" => Some("GROQ_API_KEY"),
-        "mistral" => Some("MISTRAL_API_KEY"),
-        "xai" | "grok" => Some("XAI_API_KEY"),
-        "moonshot" | "kimi" => Some("MOONSHOT_API_KEY"),
-        "qwen" | "dashscope" => Some("QWEN_API_KEY"),
-        "minimax" => Some("MINIMAX_API_KEY"),
-        _ => None,
-    }
-}
