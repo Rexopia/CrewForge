@@ -3,8 +3,8 @@
 //! These tests exercise the full agent stack: provider → orchestration → tools → response.
 //! They require valid Codex OAuth credentials (`crewforge auth login --provider codex`).
 //!
-//! Run:   cargo test --manifest-path crewforge-rs/Cargo.toml --test agent_e2e -- --nocapture
-//! Skip:  Automatically skipped if Codex auth is not available.
+//! Run:   cargo test --manifest-path crewforge-rs/Cargo.toml --test agent_e2e -- --ignored --nocapture
+//! Skip:  All tests are `#[ignore]` by default (no Codex auth in CI).
 //!
 //! Event traces are always printed (via eprintln) so Claude can inspect them during debugging.
 
@@ -88,6 +88,7 @@ async fn run_turn(session: &mut AgentSession, message: &str) -> EventLog {
 
 /// Pure chat: ask a factual question, no tools.
 #[tokio::test]
+#[ignore] // Requires Codex OAuth credentials; run with: cargo test --test agent_e2e -- --ignored
 async fn e2e_simple_chat() {
     let Some(provider) = try_codex_provider() else {
         return;
@@ -116,6 +117,7 @@ async fn e2e_simple_chat() {
 
 /// File read: pre-create a file, ask the agent to read it.
 #[tokio::test]
+#[ignore]
 async fn e2e_file_read() {
     let Some(provider) = try_codex_provider() else {
         return;
@@ -153,6 +155,7 @@ async fn e2e_file_read() {
 
 /// File write: ask the agent to create a file, then verify it exists.
 #[tokio::test]
+#[ignore]
 async fn e2e_file_write() {
     let Some(provider) = try_codex_provider() else {
         return;
@@ -194,6 +197,7 @@ async fn e2e_file_write() {
 
 /// Shell execution: run a simple command and verify output.
 #[tokio::test]
+#[ignore]
 async fn e2e_shell_command() {
     let Some(provider) = try_codex_provider() else {
         return;
@@ -222,6 +226,7 @@ async fn e2e_shell_command() {
 
 /// Multi-step: read a file, transform it, write the result.
 #[tokio::test]
+#[ignore]
 async fn e2e_multi_step_read_write() {
     let Some(provider) = try_codex_provider() else {
         return;
@@ -264,6 +269,7 @@ async fn e2e_multi_step_read_write() {
 
 /// Glob search: create some files, ask the agent to find them.
 #[tokio::test]
+#[ignore]
 async fn e2e_glob_search() {
     let Some(provider) = try_codex_provider() else {
         return;
@@ -307,6 +313,7 @@ async fn e2e_glob_search() {
 
 /// Content search: search for a pattern in files.
 #[tokio::test]
+#[ignore]
 async fn e2e_content_search() {
     let Some(provider) = try_codex_provider() else {
         return;
@@ -348,6 +355,7 @@ async fn e2e_content_search() {
 
 /// Error recovery: ask to read a non-existent file.
 #[tokio::test]
+#[ignore]
 async fn e2e_error_recovery() {
     let Some(provider) = try_codex_provider() else {
         return;
@@ -384,6 +392,7 @@ async fn e2e_error_recovery() {
 
 /// Multi-turn: verify conversation context carries across turns.
 #[tokio::test]
+#[ignore]
 async fn e2e_multi_turn() {
     let Some(provider) = try_codex_provider() else {
         return;
