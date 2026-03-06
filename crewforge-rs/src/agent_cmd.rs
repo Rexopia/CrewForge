@@ -38,6 +38,8 @@ pub enum AgentCommand {
     Clear,
     /// Show the current session history
     Show,
+    /// List available models from the provider
+    Models(ModelsArgs),
 }
 
 #[derive(Debug, Args)]
@@ -46,11 +48,11 @@ pub struct ChatArgs {
     pub message: String,
 
     /// Provider: anthropic, openai, gemini, openrouter, ollama, copilot, openai-codex, etc.
-    #[arg(long, short = 'p')]
+    #[arg(long, short = 'p', default_value = "openai-codex")]
     provider: String,
 
     /// Model name (e.g. claude-opus-4-6, gpt-4o, minimax/minimax-m2.5)
-    #[arg(long, short = 'm')]
+    #[arg(long, short = 'm', default_value = "gpt-5.3-codex")]
     model: String,
 
     /// API key override (default: env var → stored auth profile)
@@ -70,12 +72,31 @@ pub struct ChatArgs {
     no_tools: bool,
 
     /// Maximum tool-call iterations per turn
-    #[arg(long, default_value = "10")]
+    #[arg(long, default_value = "50")]
     max_iterations: usize,
 
     /// Sampling temperature
     #[arg(long, default_value = "0.7")]
     temperature: f64,
+}
+
+#[derive(Debug, Args)]
+pub struct ModelsArgs {
+    /// Provider name
+    #[arg(long, short = 'p', default_value = "openai-codex")]
+    provider: String,
+
+    /// API key override
+    #[arg(long)]
+    api_key: Option<String>,
+
+    /// Base URL override
+    #[arg(long)]
+    base_url: Option<String>,
+
+    /// Filter model names (substring match)
+    #[arg(long, short = 'f')]
+    filter: Option<String>,
 }
 
 // ── Session persistence ──────────────────────────────────────────────────────
@@ -360,6 +381,112 @@ fn run_show() -> Result<()> {
     Ok(())
 }
 
+// ── Models ───────────────────────────────────────────────────────────────────
+
+async fn run_models(args: ModelsArgs) -> Result<()> {
+    let lower = args.provider.to_lowercase();
+    let is_codex = lower == "openai-codex" || lower == "codex";
+
+    let client = reqwest::Client::new();
+
+    // Resolve URL and bearer token.
+    let (url, bearer) = if is_codex {
+        // Codex OAuth token → chatgpt.com backend-api.
+        let svc = AuthService::new(&default_state_dir(), true);
+        let token = svc
+            .get_valid_openai_access_token(None)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "OpenAI Codex OAuth not configured. Run `crewforge auth login --provider openai-codex`."
+                )
+            })?;
+        let base = args
+            .base_url
+            .unwrap_or_else(|| "https://chatgpt.com/backend-api/codex".to_string());
+        (
+            format!("{}/models?client_version=0.1.0", base.trim_end_matches('/')),
+            token,
+        )
+    } else {
+        // OpenAI-compatible providers: GET {base_url}/models.
+        let resolved_key = if let Some(k) = &args.api_key {
+            Some(k.clone())
+        } else {
+            ProviderRegistry::load()
+                .api_key_env(&args.provider)
+                .and_then(|env| std::env::var(env).ok())
+                .filter(|v| !v.is_empty())
+        };
+
+        let registry = ProviderRegistry::load();
+        let base_url = if let Some(url) = args.base_url {
+            url
+        } else if let Some(def) = registry.lookup(&args.provider) {
+            def.base_url.clone()
+        } else {
+            anyhow::bail!("Unknown provider '{}'. Use --base-url.", args.provider);
+        };
+
+        (
+            format!("{}/models", base_url.trim_end_matches('/')),
+            resolved_key.unwrap_or_default(),
+        )
+    };
+
+    let resp = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {bearer}"))
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("GET {url} failed ({status}): {body}");
+    }
+
+    let json: serde_json::Value = resp.json().await?;
+
+    // Support both {"data": [...]} (OpenAI standard) and {"models": [...]} formats.
+    let models = json
+        .get("data")
+        .or_else(|| json.get("models"))
+        .and_then(|d| d.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut names: Vec<String> = models
+        .iter()
+        .filter_map(|m| {
+            m.get("id")
+                .or_else(|| m.get("slug"))
+                .or_else(|| m.get("model"))
+                .and_then(|id| id.as_str())
+                .map(String::from)
+        })
+        .collect();
+    names.sort();
+
+    if let Some(ref f) = args.filter {
+        let f_lower = f.to_lowercase();
+        names.retain(|n| n.to_lowercase().contains(&f_lower));
+    }
+
+    if names.is_empty() {
+        // No structured list found — dump raw response for debugging.
+        eprintln!("No models found. Raw response:");
+        println!("{}", serde_json::to_string_pretty(&json).unwrap_or_default());
+    } else {
+        eprintln!("{} models (provider: {}):\n", names.len(), args.provider);
+        for name in &names {
+            println!("  {name}");
+        }
+    }
+
+    Ok(())
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 pub async fn run(args: AgentArgs) -> Result<()> {
@@ -367,5 +494,6 @@ pub async fn run(args: AgentArgs) -> Result<()> {
         AgentCommand::Chat(chat_args) => run_chat(chat_args).await,
         AgentCommand::Clear => run_clear(),
         AgentCommand::Show => run_show(),
+        AgentCommand::Models(models_args) => run_models(models_args).await,
     }
 }

@@ -74,8 +74,8 @@ pub struct AgentSessionConfig {
 impl Default for AgentSessionConfig {
     fn default() -> Self {
         Self {
-            max_iterations: 10,
-            max_history_messages: 50,
+            max_iterations: 50,
+            max_history_messages: 200,
             temperature: 0.7,
         }
     }
