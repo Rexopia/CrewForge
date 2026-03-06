@@ -38,7 +38,7 @@ enum Commands {
         auth_command: auth_cmd::AuthCommands,
     },
 
-    /// Run an interactive agent session (native Rust provider stack)
+    /// Debug agent: single-turn chat with persistent session
     Agent(agent_cmd::AgentArgs),
 }
 

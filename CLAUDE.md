@@ -61,19 +61,21 @@ User → chat.rs → SessionKernel (kernel.rs, JSONL on disk)
 
 **Key constraint:** `crewforge chat` agents run via `opencode` subprocess — they do **not** use the Rust provider stack (`src/provider/`). The Rust provider stack is used only by `crewforge agent`.
 
-### `crewforge agent` (native Rust agent REPL)
+### `crewforge agent` (debug CLI with persistent sessions)
 
 ```
 agent_cmd.rs → AgentSession (agent/orchestrate.rs)
-                    ├→ research.rs    (optional pre-response research phase)
-                    ├→ dispatch.rs    (tool call parsing + result formatting)
-                    ├→ history.rs     (message conversion, trim, auto-compaction)
-                    ├→ scrub.rs       (credential scrubbing)
-                    ├→ tools/         (11 built-in tools)
-                    ├→ context/       (system prompt assembly, memory backend)
-                    ├→ sandbox/       (SecurityPolicy, AutonomyLevel)
-                    └→ provider::create_provider()  (Rust provider stack)
+  subcommands:             ├→ research.rs    (optional pre-response research phase)
+    chat "msg"             ├→ dispatch.rs    (tool call parsing + result formatting)
+    clear                  ├→ history.rs     (message conversion, trim, auto-compaction)
+    show                   ├→ scrub.rs       (credential scrubbing)
+                           ├→ tools/         (11 built-in tools)
+                           ├→ context/       (system prompt assembly, memory backend)
+                           ├→ sandbox/       (SecurityPolicy, AutonomyLevel)
+                           └→ provider::create_provider()  (Rust provider stack)
 ```
+
+Session persisted to `.crewforge/debug-session.json`. Debug output format: `[HISTORY]` for previous messages, `[MM:SS.mmm]` timestamps, `[EVENT]` for agent events.
 
 ### Library crate (`crewforge` lib — `src/lib.rs`)
 
@@ -105,10 +107,12 @@ Token resolution priority in `crewforge agent`: `--api-key` flag → env var (e.
 ## CLI Commands
 
 ```
-crewforge init       # manage global agent profiles (~/.crewforge/profiles.json)
-crewforge chat       # start multi-agent room (uses opencode subprocess)
-crewforge auth       # manage provider credentials (OAuth / API keys)
-crewforge agent      # interactive single-agent REPL (native Rust provider stack)
+crewforge init                   # manage global agent profiles (~/.crewforge/profiles.json)
+crewforge chat                   # start multi-agent room (uses opencode subprocess)
+crewforge auth                   # manage provider credentials (OAuth / API keys)
+crewforge agent chat -p P -m M "msg"  # single-turn debug chat (persistent session)
+crewforge agent clear            # clear debug session
+crewforge agent show             # show debug session history
 ```
 
 `crewforge auth` subcommands: `login`, `paste-redirect`, `paste-token`, `refresh`, `logout`, `use`, `list`, `status`.
@@ -148,7 +152,7 @@ crewforge-rs/src/
 │   │   ├── glob_search.rs        #     Glob pattern search
 │   │   ├── content_search.rs     #     Content grep search
 │   │   ├── memory.rs             #     memory_store / memory_recall / memory_forget
-│   │   ├── web_search.rs         #     Brave Search API (requires BRAVE_API_KEY)
+│   │   ├── web_search.rs         #     SearXNG search (requires SEARXNG_URL)
 │   │   └── web_fetch.rs          #     URL fetch + HTML→Markdown (html2md, SSRF protection)
 │   ├── sandbox/                  #   Security policy + approval
 │   │   ├── mod.rs
@@ -203,7 +207,7 @@ launcher ──→ agent ──→ provider
 - **provider/ types (ChatMessage, ToolSpec, etc.) stay in provider/** — agent/ depends on provider/ unidirectionally. If protocol types become too entangled, consider extracting a `types/` module later.
 - **Memory via tools, not prompt injection** — dynamic memory (memory_store/recall/forget) is tool-based. Static project context (CLAUDE.md, AGENTS.md) is injected at startup via IdentitySection. FileMemory uses JSONL at `{workspace}/.crewforge/memory.jsonl`.
 - **Research phase is optional** — configured via `ResearchConfig` (trigger: Question/Always/Keywords/Never). Runs a separate LLM+tools loop before the main response to gather facts. Default trigger: `Question` (messages containing `?`).
-- **Web search requires API key** — `web_search` uses Brave Search API (`BRAVE_API_KEY` env var). Returns a clear error if not configured. `web_fetch` works out of the box with SSRF protection.
+- **Web search uses SearXNG** — `web_search` connects to a self-hosted SearXNG instance (`SEARXNG_URL` env var, e.g. `http://localhost:8080`). No API key needed. Quick start: `docker run -d -p 8080:8080 searxng/searxng`. JSON format must be enabled in SearXNG settings. `web_fetch` works out of the box with SSRF protection.
 - **Incremental migration** — no big-bang refactor. Develop new code toward this structure; migrate existing code when touching it.
 
 ## Key Patterns and Gotchas
@@ -235,6 +239,7 @@ unsafe {
 - Provider overrides: `~/.crewforge/providers.toml`
 - Pending OAuth state: `~/.crewforge/auth-{provider}-pending.json`
 - Agent memory: `{workspace}/.crewforge/memory.jsonl` (per-project, JSONL)
+- Debug session: `{workspace}/.crewforge/debug-session.json` (per-project, persists across `crewforge agent chat` calls)
 - Room sessions: `.room/sessions/session-<id>.jsonl` (per-project)
 - Room config: `.room/room.json` (per-project)
 

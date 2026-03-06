@@ -1,5 +1,5 @@
+pub mod codex;
 pub mod compatible;
-pub mod openai_oauth;
 pub mod registry;
 pub mod reliable;
 pub mod router;
@@ -46,7 +46,7 @@ pub fn create_provider(
             ..ProviderRuntimeOptions::default()
         };
         return Ok(Box::new(
-            openai_oauth::OpenAiCodexProvider::new(&opts)
+            codex::OpenAiCodexProvider::new(&opts)
                 .map_err(|e| anyhow::anyhow!("Failed to create OpenAI Codex provider: {e}"))?,
         ));
     }

@@ -2,10 +2,14 @@ use crate::agent::ToolResult;
 use async_trait::async_trait;
 use reqwest::Client;
 
-/// Web search tool using Brave Search API.
+/// Web search tool using a SearXNG instance.
 ///
-/// Requires `BRAVE_API_KEY` environment variable.
-/// Free tier: 2000 queries/month at <https://brave.com/search/api/>.
+/// Requires `SEARXNG_URL` environment variable (e.g. `http://localhost:8080`).
+/// SearXNG is a free, self-hosted metasearch engine that aggregates results
+/// from multiple search engines (Google, Bing, DuckDuckGo, Brave, etc.).
+///
+/// Quick start: `docker run -d -p 8080:8080 searxng/searxng`
+/// Docs: <https://docs.searxng.org>
 pub struct WebSearchTool {
     client: Client,
 }
@@ -20,14 +24,18 @@ impl WebSearchTool {
     pub fn new() -> Self {
         Self {
             client: Client::builder()
-                .timeout(std::time::Duration::from_secs(15))
+                .timeout(std::time::Duration::from_secs(20))
+                .no_proxy()
                 .build()
                 .expect("failed to build HTTP client"),
         }
     }
 
-    fn api_key(&self) -> Option<String> {
-        std::env::var("BRAVE_API_KEY").ok().filter(|k| !k.is_empty())
+    fn base_url(&self) -> Option<String> {
+        std::env::var("SEARXNG_URL")
+            .ok()
+            .filter(|u| !u.is_empty())
+            .map(|u| u.trim_end_matches('/').to_string())
     }
 }
 
@@ -38,8 +46,8 @@ impl crate::agent::Tool for WebSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search the web using Brave Search API. Requires BRAVE_API_KEY environment variable. \
-         Free tier: 2000 queries/month."
+        "Search the web using a SearXNG instance. Requires SEARXNG_URL environment variable \
+         (e.g. http://localhost:8080). Aggregates results from multiple search engines."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -60,14 +68,15 @@ impl crate::agent::Tool for WebSearchTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let Some(api_key) = self.api_key() else {
+        let Some(base_url) = self.base_url() else {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some(
-                    "web_search is unavailable: BRAVE_API_KEY not configured. \
-                     Get a free API key at https://brave.com/search/api/ and set it as \
-                     the BRAVE_API_KEY environment variable."
+                    "web_search is unavailable: SEARXNG_URL not configured. \
+                     Set the SEARXNG_URL environment variable to your SearXNG instance \
+                     (e.g. http://localhost:8080). \
+                     Quick start: docker run -d -p 8080:8080 searxng/searxng"
                         .into(),
                 ),
             });
@@ -84,7 +93,7 @@ impl crate::agent::Tool for WebSearchTool {
             .map(|v| v.clamp(1, 10) as usize)
             .unwrap_or(5);
 
-        match brave_search(&self.client, &api_key, query, max_results).await {
+        match searxng_search(&self.client, &base_url, query, max_results).await {
             Ok(results) if results.is_empty() => {
                 Ok(ToolResult::ok("No search results found."))
             }
@@ -116,32 +125,41 @@ struct SearchResult {
     snippet: String,
 }
 
-/// Call Brave Search API.
-async fn brave_search(
+/// Call SearXNG JSON API.
+async fn searxng_search(
     client: &Client,
-    api_key: &str,
+    base_url: &str,
     query: &str,
     max_results: usize,
 ) -> anyhow::Result<Vec<SearchResult>> {
+    let url = format!("{base_url}/search");
     let resp = client
-        .get("https://api.search.brave.com/res/v1/web/search")
-        .header("X-Subscription-Token", api_key)
-        .header("Accept", "application/json")
-        .query(&[("q", query), ("count", &max_results.to_string())])
+        .get(&url)
+        .query(&[
+            ("q", query),
+            ("format", "json"),
+            ("pageno", "1"),
+        ])
         .send()
         .await?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("Brave API returned {status}: {body}");
+        if status.as_u16() == 403 {
+            anyhow::bail!(
+                "SearXNG returned 403 Forbidden. \
+                 Ensure JSON format is enabled in SearXNG settings \
+                 (search.formats must include 'json')."
+            );
+        }
+        anyhow::bail!("SearXNG returned {status}: {body}");
     }
 
     let json: serde_json::Value = resp.json().await?;
 
     let results = json
-        .get("web")
-        .and_then(|w| w.get("results"))
+        .get("results")
         .and_then(|r| r.as_array())
         .map(|arr| {
             arr.iter()
@@ -150,7 +168,7 @@ async fn brave_search(
                     let title = item.get("title")?.as_str()?.to_string();
                     let url = item.get("url")?.as_str()?.to_string();
                     let snippet = item
-                        .get("description")
+                        .get("content")
                         .and_then(|d| d.as_str())
                         .unwrap_or("")
                         .to_string();
@@ -180,11 +198,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_api_key_returns_error() {
-        // Ensure no key is set for this test.
+    async fn no_url_returns_error() {
         let tool = WebSearchTool::new();
-        if tool.api_key().is_some() {
-            return; // Skip if key is actually configured.
+        if tool.base_url().is_some() {
+            return; // Skip if URL is actually configured.
         }
 
         let result = tool
@@ -192,31 +209,32 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.success);
-        assert!(result.error.as_ref().unwrap().contains("BRAVE_API_KEY"));
+        assert!(result.error.as_ref().unwrap().contains("SEARXNG_URL"));
     }
 
     #[test]
-    fn parse_brave_response() {
+    fn parse_searxng_response() {
         let json: serde_json::Value = serde_json::json!({
-            "web": {
-                "results": [
-                    {
-                        "title": "Rust Language",
-                        "url": "https://rust-lang.org",
-                        "description": "A systems programming language"
-                    },
-                    {
-                        "title": "Rust Docs",
-                        "url": "https://doc.rust-lang.org",
-                        "description": "Official documentation"
-                    }
-                ]
-            }
+            "query": "rust",
+            "results": [
+                {
+                    "title": "Rust Language",
+                    "url": "https://rust-lang.org",
+                    "content": "A systems programming language",
+                    "engines": ["google", "duckduckgo"],
+                    "score": 8.0
+                },
+                {
+                    "title": "Rust Docs",
+                    "url": "https://doc.rust-lang.org",
+                    "content": "Official documentation",
+                    "engines": ["google"],
+                    "score": 4.0
+                }
+            ]
         });
 
         let results: Vec<SearchResult> = json
-            .get("web")
-            .unwrap()
             .get("results")
             .unwrap()
             .as_array()
@@ -226,7 +244,7 @@ mod tests {
                 Some(SearchResult {
                     title: item.get("title")?.as_str()?.to_string(),
                     url: item.get("url")?.as_str()?.to_string(),
-                    snippet: item.get("description")?.as_str()?.to_string(),
+                    snippet: item.get("content")?.as_str()?.to_string(),
                 })
             })
             .collect();
